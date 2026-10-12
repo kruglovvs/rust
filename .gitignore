@@ -1,0 +1,16 @@
+# Build output
+target/
+.embuild/
+
+# Backup files
+*.bak.*
+
+# Planning / agent scratch (never committed per plan commit strategy)
+.omo/
+.opencode/state/
+
+# Stray host file, not part of firmware scaffold
+ff-fmt.texi
+
+# Host tooling (not firmware)
+node_modules/

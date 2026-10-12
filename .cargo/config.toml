@@ -1,0 +1,26 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.'cfg(target_os = "espidf")']
+linker = "ldproxy"
+runner = "espflash flash --monitor"
+rustflags = [ "--cfg",  "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+ESP_IDF_VERSION = "v5.5.2"
+ESP_IDF_TOOLS_INSTALL_DIR = "global"
+# Base ESP-IDF has no OV2640/OV3660 sensor driver; this adds
+# espressif/esp32-camera plus its bindings. See camera-extra.toml.
+# Todo 14: espressif/mdns is an EXTRA managed component on ESP-IDF 5.5+
+# (no in-tree components/mdns); it ships in net-extra.toml because
+# camera-extra.toml is frozen. The env var is comma-separated
+# (esp-idf-sys 0.38.1 try_from_env merges every listed file).
+ESP_IDF_SYS_EXTRA_COMPONENTS_FILE = "camera-extra.toml,net-extra.toml"
+
+# Uncomment this if you have moved the target dir by setting CARGO_TARGET_DIR or similar.
+# Required for now due to embuild limitations.
+#CARGO_WORKSPACE_DIR = { value = "", relative = true }

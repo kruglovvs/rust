@@ -1,0 +1,58 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Модели по умолчанию. Формат ОБЯЗАТЕЛЬНО "<провайдер>/<модель>" —
+  // "deepseek-reasoner" без префикса провайдера opencode отвергает
+  // (ProviderModelNotFoundError) и молча подставляет свой дефолт.
+  "model": "proxyapi/xiaomi/mimo-v2.6-flash",
+  "small_model": "proxyapi/qwen/qwen3.7-flash",
+  // Подключение плагина OmO через массив строк
+  "plugin": [
+    "oh-my-openagent@latest",
+    "@kagan-sh/kagan@latest"
+  ],
+  // Таблица маршрутизации провайдеров ядра через шлюз ProxyAPI.
+  // Документация: https://proxyapi.ru/docs/migration
+  // Единый базовый адрес шлюза — https://api.proxyapi.ru
+  // (/v1 для OpenAI-совместимых SDK, /v1beta для Google-совместимых).
+  "provider": {
+    "openai": {
+      "options": {
+        "baseURL": "https://api.proxyapi.ru/v1",
+        "apiKey": "sk-rRC8d2Fj82sDGlOlILawNBmrSbByyV74"
+      }
+    },
+    "google": {
+      "options": {
+        "baseURL": "https://api.proxyapi.ru/v1beta",
+        "apiKey": "sk-rRC8d2Fj82sDGlOlILawNBmrSbByyV74"
+      }
+    },
+    "anthropic": {
+      "options": {
+        // Было "https://proxyapi.ru/v1" (без "api.") -> 404 Not Found
+        // в логе на каждой транзакции титл/промпт-агента.
+        "baseURL": "https://api.proxyapi.ru/v1",
+        "apiKey": "sk-rRC8d2Fj82sDGlOlILawNBmrSbByyV74"
+      }
+    },
+    "proxyapi": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "ProxyAPI",
+      "options": {
+        "baseURL": "https://api.proxyapi.ru/v1",
+        "apiKey": "sk-rRC8d2Fj82sDGlOlILawNBmrSbByyV74"
+      },
+      "models": {
+        "qwen/qwen3.7-flash": {
+          "name": "Qwen 3.7 Flash"
+        },
+        "xiaomi/mimo-v2.6-flash": {
+          "name": "MiMo 2.6 Flash"
+        },
+        "moonshotai/kimi-k2": {
+          "name": "kimi k2"
+        }
+      }
+    }
+  }
+}

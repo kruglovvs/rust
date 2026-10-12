@@ -1,0 +1,6 @@
+# Harness is host-only (the plan's Wave-1 oracle runs on the build machine:
+# retina/ffmpeg/gstreamer cannot build for xtensa-esp32s3-espidf). The parent
+# /workspaces/rust/.cargo/config.toml sets build.target = "xtensa-esp32s3-espidf"
+# for the firmware workspace; this file overrides it for the harness workspace.
+[build]
+target = "x86_64-unknown-linux-gnu"

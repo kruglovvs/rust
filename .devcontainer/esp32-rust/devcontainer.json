@@ -1,0 +1,45 @@
+{
+    "name": "esp32-rust",
+    // Используем официальный образ Espressif с поддержкой Rust
+    "build": {
+        "dockerfile": "containerfile",
+        // Корень репозитория, чтобы containerfile мог COPY scripts/install-toolchain.sh
+        // (иначе логика установки тулчейна продублировалась бы в двух местах).
+        "context": "../.."
+    },
+    // Тулчейн: ESP-IDF v5.5.2 + rust stable + cmake. См. docs/toolchain.md
+    "containerEnv": {
+        "IDF_PATH": "/opt/esp/idf",
+        "IDF_TOOLS_PATH": "/opt/esp/idf-tools",
+        "IDF_TARGET": "esp32s3"
+    },
+    "mounts": [
+        // Монтируем udev для корректного обнаружения USB-устройств в Linux
+        "source=/run/udev,target=/run/udev,type=bind,readonly",
+        // Хранилище opencode (сессии в opencode.db) в .opencode/state репозитория,
+        // чтобы сессии переживали пересборку контейнера.
+        // source — путь на ХОСТЕ, поэтому ${localWorkspaceFolder}, а не ${containerWorkspaceFolder}.
+        "source=${localWorkspaceFolder}/.opencode/state,target=/root/.local/share/opencode,type=bind"
+    ],
+    // Переключаемся на встроенного пользователя 'esp'
+    "remoteUser": "root",
+    // Пробрасываем USB-устройство и права для прошивки платы прямо из контейнера
+    "runArgs": [
+        "--privileged",
+        "--device=/dev/ttyACM0:/dev/ttyACM0", // Замените на /dev/ttyUSB0, если плата определяется так
+        "--group-add=dialout",
+        "--group-add=uucp"
+    ],
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "rust-analyzer.cargo.target": "xtensa-esp32s3-espidf" // Для ESP32 (стандартная/std)
+            },
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "mutantdino.resourcemonitor"
+            ]
+        }
+    }
+}

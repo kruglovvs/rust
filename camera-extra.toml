@@ -1,0 +1,9 @@
+[[extra_components]]
+remote_component = { name = "espressif/esp32-camera", version = "2.1.2" }
+bindings_module = "camera"
+# DEVIATION from plan Todo 2: absolute path. When loaded via
+# ESP_IDF_SYS_EXTRA_COMPONENTS_FILE, esp-idf-sys 0.38.1 leaves `manifest_dir`
+# empty (only [[package.metadata.esp-idf-sys.extra_components]] in Cargo.toml
+# sets it), so a relative "bindings.h" resolves against the build script's CWD,
+# not the workspace. See build/native/cargo_driver/config.rs env-file branch.
+bindings_header = "/workspaces/rust/bindings.h"

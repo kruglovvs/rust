@@ -1,0 +1,23 @@
+# ESP-IDF extra component: espressif/mdns (plan Todo 14 — mDNS `_rtsp._tcp` discovery).
+#
+# Loaded via the comma-separated ESP_IDF_SYS_EXTRA_COMPONENTS_FILE list in
+# `.cargo/config.toml` ("camera-extra.toml,net-extra.toml"): esp-idf-sys 0.38.1
+# `try_from_env` splits that list and merges every file's `extra_components`.
+# This file exists because:
+#   * base ESP-IDF 5.5.2 has NO in-tree components/mdns (it moved to a managed
+#     component), so `esp_idf_svc::mdns` is cfg'd OUT
+#     (`esp_idf_comp_espressif__mdns_enabled`) and `mdns_init` is absent from
+#     the generated bindings until the component is added;
+#   * the root-crate `package.metadata.esp-idf-sys.extra_components` path is
+#     dead in this workspace (env file takes precedence; virtual workspace root
+#     has no root package — see .omo/notepads/.../learnings.md Todo 3 + 14);
+#   * camera-extra.toml must not be modified (Todo 14 MUST-NOT list).
+#
+# Version pinned exactly (plan Must-NOT: "No unpinned remote_component
+# version"): 1.14.0 is the registry's current release (2026-10-02) and
+# declares idf >= 5.0 (verified against components.espressif.com API).
+# Base bindings.h already #include "mdns.h", so symbols land in the top-level
+# esp_idf_sys module once the component is present.
+
+[[extra_components]]
+remote_component = { name = "espressif/mdns", version = "1.14.0" }

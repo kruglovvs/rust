@@ -1,0 +1,114 @@
+[workspace]
+
+[package]
+name = "esp32s3-av-harness"
+version = "0.1.0"
+edition = "2021"
+
+# no_std proof for the plan's Todo 6 extractor: here the file IS the crate root,
+# so its `#![no_std]` attribute takes effect. `cargo build --lib` must succeed
+# with zero dependencies and no std.
+[lib]
+name = "jfif_nostd"
+path = "../firmware/src/jfif.rs"
+
+[[bin]]
+name = "gate6"
+path = "src/main.rs"
+
+# Todo 9: host-executed proof for firmware/src/muxer.rs — the file is
+# #[path]-included (jfif pattern) and driven through our own Muxer trait to
+# produce a real .avi that ffprobe validates. muxer.rs is pure std + oxideav,
+# so it compiles unchanged on the host.
+[[bin]]
+name = "task9_avi"
+path = "src/task9_avi.rs"
+
+# Todo 10: host-executed proof for firmware/src/recorder.rs — single-clock
+# A/V alignment, drop-never-duplicate video, segment rollover into separate
+# REC_%04d.avi files. Drives the real Recorder over DirFactory/AviMuxer and
+# asserts the IS-5 structural no-AVIX property; ffprobe runs in the shell.
+[[bin]]
+name = "task10_recorder"
+path = "src/task10_recorder.rs"
+
+# Todo 8: audio_quality.rs is pure/zero-dep/FFI-free, so its unit tests RUN
+# here on the host (the #[path] include is the jfif pattern applied to a
+# module instead of a crate root).
+[[test]]
+name = "audio_quality"
+path = "tests/audio_quality.rs"
+
+# Todo 10: recorder.rs unit tests (naming/no-overwrite/trigger/drop logic)
+# run here on the host the same way.
+[[test]]
+name = "task10_recorder"
+path = "tests/task10_recorder.rs"
+
+# Todo 14: session.rs (backpressure + lifecycle), net.rs (credentials/SNTP
+# clock/backoff) and artifact_server.rs (path parsing + size cap) — pure
+# layers, host-executed via the same #[path] include.
+[[test]]
+name = "task14_net"
+path = "tests/task14_net.rs"
+
+# Todo 11: the RTSP session layer (request parsing, SDP with the locked codec
+# strings, Transport parsing, single-session dispatch, $-interleaved framing,
+# loopback socket lifecycle) — pure std, host-executed via #[path] include.
+[[test]]
+name = "task11_rtsp"
+path = "tests/task11_rtsp.rs"
+
+# Todo 11 evidence: drives the plan's 4xx matrix through the real dispatch
+# and prints `request -> status` for .omo/evidence/task-11/error-responses.txt.
+[[bin]]
+name = "task11_errors"
+path = "src/task11_errors.rs"
+
+# Todo 12: the RTP payloaders (half-band decimator, G.711 µ-law PCMU PT 0,
+# RFC 2435 JPEG PT 26) plus a real Service loopback proving the packets flow
+# through RtpSender's $-interleaved framing — pure std, host-executed via the
+# same #[path] include.
+[[test]]
+name = "task12_payload"
+path = "tests/task12_payload.rs"
+
+# Todo 13: RTCP Sender Reports — RFC 3550 §6.4.1 SR byte layout against a
+# hand-computed vector, NTP 64-bit field mapping from fixed SystemTime
+# instants (era-2000 anchor + 2 208 988 800 s epoch offset), the EXPLICIT
+# 32-bit RTP-timestamp wrap at 0xFFFF_FFFF -> 0 with reported-time
+# continuity, the >= 5 s scheduler decision fn (never early), the unsynced
+# suppression predicate ("unsynced, SR suppressed", zero bytes), RR parse,
+# and the spawn/teardown loop — pure std, host-executed via the same
+# #[path] include (no rtsp/session includes: no shared-static surface).
+[[test]]
+name = "task13_rtcp"
+path = "tests/task13_rtcp.rs"
+
+# Todo 12 evidence: prints the compander 256-code table, the swept-sine filter
+# response, the PT=0 header byte, the JPEG/RTSP-path loopbacks, and drives the
+# ffmpeg-SDP loopback take (audio-send / video-send / wav-check) for
+# .omo/evidence/task-12/. `test = false`: the RTSP-path modes include
+# session.rs + rtsp/, whose #[cfg(test)] suites share the global SESSION
+# unsafely (pre-existing Todo 11/14 race) — a non-test build compiles none of
+# them, so this evidence bin can never trip it. Payload unit tests run in the
+# task12_payload target instead.
+[[bin]]
+name = "task12_report"
+path = "src/task12_report.rs"
+test = false
+
+[dependencies]
+# Second-oracle candidate (MSRV 1.88 <= toolchain 1.89). Its JPEG Depacketizer
+# cannot be driven in-process (Depacketizer::push is pub(crate)); GStreamer's
+# rtpjpegdepay serves as the second independent depacketizer instead — see
+# .omo/evidence/task-6/. Kept as a fetched, build-proven dependency per plan.
+retina = "=0.4.21"
+# Todo 9: exact pins matching firmware/Cargo.toml (oxideav-core is oxideav-avi's
+# non-re-exported public type surface — see the firmware manifest comment).
+oxideav-avi = "=0.0.10"
+oxideav-core = "=0.1.39"
+# Todo 12: the plan's one new dependency, pinned exactly as in
+# firmware/Cargo.toml — G.711 µ-law encode/decode for the payload tests and
+# the exhaustive 256-code round-trip evidence.
+audio-codec-algorithms = { version = "=0.8", default-features = false }
