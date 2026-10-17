@@ -1,13 +1,11 @@
 FROM espressif/idf-rust:esp32s3_latest
 USER root
 
-RUN apt-get update && apt-get install nodejs npm
-RUN npm install -g node@latest
-RUN npm install -g npm@latest
-RUN npm install -g opencode-ai@latest
-RUN npm install -g omo-ai@latest
+# (Предыдущие шаги установки Node.js и обновления npm...)
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm curl ca-certificates && rm -rf /var/lib/apt/lists/*
+# RUN npm install -g n && n lts
+RUN hash -r && npm install -g node@latest
+# RUN hash -r && npm install -g npm@latest
 
-
-# RUN rustup default stable
-# RUN espup install
-# USER esp
+# Установка opencode-ai с принудительным разрешением запуска postinstall-скриптов
+RUN npm install -g opencode-ai@latest --foreground-scripts --allow-scripts

@@ -14,6 +14,11 @@
         "IDF_TARGET": "esp32s3"
     },
     "mounts": [
+        // Пробрасываем хостовый /dev целиком: узлы ttyACM*/ttyUSB* появляются
+        // сразу при подключении платы, без перезапуска контейнера.
+        // Прямой --device=/dev/ttyACM0 ломается на WSL, когда устройство
+        // переподключается: docker не стартует, если узла нет на хосте.
+        "source=/dev,target=/dev,type=bind",
         // Монтируем udev для корректного обнаружения USB-устройств в Linux
         "source=/run/udev,target=/run/udev,type=bind,readonly",
         // Хранилище opencode (сессии в opencode.db) в .opencode/state репозитория,
@@ -23,10 +28,13 @@
     ],
     // Переключаемся на встроенного пользователя 'esp'
     "remoteUser": "root",
-    // Пробрасываем USB-устройство и права для прошивки платы прямо из контейнера
+    // Пробрасываем USB-устройство и права для прошивки платы прямо из контейнера.
+    // Вместо --device=/dev/ttyACM0 (ломается на WSL при переподключении платы —
+    // docker отказывается стартовать без узла) используем общее правило на
+    // major 188: это ttyACM* и ttyUSB*, т.е. любой USB-серийный адаптер.
     "runArgs": [
         "--privileged",
-        "--device=/dev/ttyACM0:/dev/ttyACM0", // Замените на /dev/ttyUSB0, если плата определяется так
+        "--device-cgroup-rule=c 188:* rwm",
         "--group-add=dialout",
         "--group-add=uucp"
     ],
