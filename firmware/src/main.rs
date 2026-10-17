@@ -120,6 +120,9 @@ mod mic;
 #[allow(dead_code)]
 mod muxer;
 
+#[cfg(test)]
+mod device_boundary_tests;
+
 use esp_idf_sys::camera::{
     camera_config_t, camera_fb_t, esp_camera_deinit, esp_camera_fb_get, esp_camera_fb_return,
     esp_camera_init, esp_camera_sensor_get,
