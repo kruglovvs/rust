@@ -507,10 +507,6 @@ mod tests {
         let s = frame_stats(&buf);
         let theory = amp / 2.0f32.sqrt(); // A/√2
         let err = (s.rms - theory).abs() / theory;
-        println!(
-            "injected-reference: amp={:.1} sample_rms={:.3} theory_rms={:.3} err={:.4}% crest_db={:.3} stddev={:.3} peak={}",
-            amp, s.rms, theory, err * 100.0, s.crest_db, s.stddev, s.peak
-        );
         assert!(err < 0.05, "rms {} vs theory {} (err {:.3}%)", s.rms, theory, err * 100.0);
         // 320 samples = exactly 20 cycles of 1 kHz at 16 kHz, and a sample
         // lands on the peak => crest = 3.01 dB (full-scale sine law).
@@ -526,7 +522,6 @@ mod tests {
     fn goertzel_recovers_on_grid_tone_amplitude() {
         let buf = sine(1000.0, 0.5 * 32767.0, 320, 16000.0);
         let mag = goertzel_mag(&buf, 1000.0, 16000.0);
-        println!("goertzel 1 kHz on 320-frame: {:.5} (expect ≈0.5)", mag);
         assert!((mag - 0.5).abs() / 0.5 < 0.02, "mag = {}", mag);
     }
 
@@ -541,7 +536,6 @@ mod tests {
         let tone = goertzel_mag(&buf, 1000.0, 16000.0);
         let hum50 = goertzel_mag(&buf, 50.0, 16000.0);
         let hum60 = goertzel_mag(&buf, 60.0, 16000.0);
-        println!("hum window: tone={:.4} hum50={:.4} hum60={:.4}", tone, hum50, hum60);
         assert!(hum50 > 0.1 * tone, "hum50 {} must exceed 0.1×tone {}", hum50, 0.1 * tone);
         // No 60 Hz content present ⇒ the on-grid null keeps it below the
         // 0.1× threshold too.
@@ -560,10 +554,6 @@ mod tests {
         let f320 = sine(50.0, a50, 320, 16000.0);
         let leak320 = goertzel_mag(&f320, 60.0, 16000.0);
         let true50_320 = goertzel_mag(&f320, 50.0, 16000.0);
-        println!(
-            "320-frame: 50Hz true={:.4} leaked@60Hz={:.4} (ratio {:.3})",
-            true50_320, leak320, leak320 / true50_320
-        );
         assert!(
             leak320 > 0.5 * true50_320,
             "off-grid leakage must be large: {} vs {}",
@@ -576,10 +566,6 @@ mod tests {
         let f1600 = sine(50.0, a50, 1600, 16000.0);
         let leak1600 = goertzel_mag(&f1600, 60.0, 16000.0);
         let true50_1600 = goertzel_mag(&f1600, 50.0, 16000.0);
-        println!(
-            "1600-window: 50Hz true={:.4} leaked@60Hz={:.3e} (ratio {:.2e})",
-            true50_1600, leak1600, leak1600 / true50_1600
-        );
         assert!(
             leak1600 < 0.02 * true50_1600,
             "on-grid null failed: {} vs {}",
@@ -617,7 +603,6 @@ mod tests {
         // (flooring would drag p15 down and change the answer).
         assert_eq!(with_nulls, baseline);
         assert!(with_nulls.is_finite());
-        println!("stnr: valid-only={:.3} dB, with 100 nulls={:.3} dB (identical)", baseline, with_nulls);
     }
 
     #[test]
@@ -660,7 +645,6 @@ mod tests {
             .collect();
         let snr = stnr_snr_db(&frames).expect("1000 valid");
         let expected = (849.15f32 - 149.85) * (d1 - d0) / 999.0;
-        println!("stnr percentile pin: {:.4} dB (expected {:.4} dB)", snr, expected);
         assert!((snr - expected).abs() < 0.01, "snr {} vs {}", snr, expected);
     }
 
