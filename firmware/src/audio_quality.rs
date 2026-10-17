@@ -629,9 +629,14 @@ mod tests {
 
     #[test]
     fn stnr_below_500_valid_frames_is_none_and_at_500_is_some() {
-        let frames: Vec<FrameStats> = (0..500u32)
-            .map(|i| frame_stats(&sine(1000.0, 1200.0 + i as f32 * 30.0, 320, 16000.0)))
-            .collect();
+        // Yield periodically: this CPU-bound loop otherwise starves IDLE0 and trips the TWDT on-device.
+        let mut frames: Vec<FrameStats> = Vec::with_capacity(500);
+        for i in 0..500u32 {
+            if i % 50 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            frames.push(frame_stats(&sine(1000.0, 1200.0 + i as f32 * 30.0, 320, 16000.0)));
+        }
         assert!(stnr_snr_db(&frames).is_some(), "500 valid frames must answer");
         assert!(stnr_snr_db(&frames[..499]).is_none(), "499 valid frames must be None");
         // …and even 600 frames of which only 499 are valid still fail.
