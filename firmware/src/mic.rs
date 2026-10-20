@@ -145,7 +145,7 @@ const READ_TIMEOUT_MS: u64 = 4 * FRAME_SAMPLES as u64 * 1000 / SAMPLE_RATE_HZ as
 /// 3.2 KiB hum window, formatting scratch); window populations live on the
 /// heap. Deliberately bounded — see `audio_quality`'s distinct-counter
 /// note about the 8 KiB device libtest stacks.
-const MIC_TASK_STACK: usize = 16 * 1024;
+const MIC_TASK_STACK: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Errors (no thiserror — plain enum + Display/Error, zero dependencies)
@@ -228,7 +228,7 @@ impl<'d> MicCapture<'d> {
         let mut driver = I2sDriver::new_pdm_rx(i2s, &rx_cfg, clk, din).map_err(MicError::Init)?;
         driver.rx_enable().map_err(MicError::Enable)?;
 
-        println!(
+        crate::log!(
             "mic: PDM RX configured clk=GPIO{} data=GPIO{} rate={}Hz mono 16-bit frame={}smp/{}B dma_desc_num={}",
             CLK_GPIO, DATA_GPIO, SAMPLE_RATE_HZ, FRAME_SAMPLES, FRAME_BYTES, DMA_DESC_NUM
         );
@@ -358,7 +358,7 @@ impl QualityLog {
     fn emit_second(&mut self) {
         let n = self.second_frames;
         if self.window.is_empty() || n == 0 {
-            println!("mic: no frames in the last second (read failures) — check the WARNING lines above");
+            crate::log!("mic: no frames in the last second (read failures) — check the WARNING lines above");
             self.second_start = Instant::now();
             self.second_frames = 0;
             self.analysis_us_total = 0.0;
@@ -405,7 +405,7 @@ impl QualityLog {
 
         let analysis_avg = self.analysis_us_total / n as f64;
 
-        println!(
+        crate::log!(
             "mic: fps={} rms_dbfs_p95={:.1} stddev_gt0_pct={:.1} stddev_median={:.1} peak_max={} crest_db_median={:.2} rail_runs_max={} stnr_db={} analysis_us_avg={:.2} dc_ratio_p95={:.4}",
             n, rms_p95, pos_pct, stddev_med, peak_max, crest_med, rail_max, stnr, analysis_avg, dc_p95
         );
@@ -414,7 +414,7 @@ impl QualityLog {
             let tone = goertzel_mag(&self.hum, 1000.0, SAMPLE_RATE_HZ as f32);
             let h50 = goertzel_mag(&self.hum, 50.0, SAMPLE_RATE_HZ as f32);
             let h60 = goertzel_mag(&self.hum, 60.0, SAMPLE_RATE_HZ as f32);
-            println!(
+            crate::log!(
                 "mic-hum: tone_1khz={:.4} hum50={:.4} hum60={:.4} window={}smp fs={}",
                 tone, h50, h60, HUM_WINDOW_SAMPLES, SAMPLE_RATE_HZ
             );
@@ -450,7 +450,7 @@ impl<'d> MicCapture<'d> {
     /// The dedicated-task body — see [`MicCapture::spawn`].
     fn capture_loop(mut self, tx: Sender<AudioFrame>) {
         let mut log = QualityLog::new();
-        println!(
+        crate::log!(
             "mic: capture task running task=mic_capture stack={} window={}frames({}s)",
             MIC_TASK_STACK,
             WINDOW_FRAMES,
@@ -463,16 +463,16 @@ impl<'d> MicCapture<'d> {
             let frame = match self.read_frame() {
                 Ok(f) => f,
                 Err(MicError::Timeout { waited_ms }) => {
-                    println!("WARNING: mic read timeout after {waited_ms} ms — frame dropped (task alive)");
+                    crate::log!("WARNING: mic read timeout after {waited_ms} ms — frame dropped (task alive)");
                     std::thread::sleep(Duration::from_millis(20));
                     continue;
                 }
                 Err(MicError::ShortRead { expected, got }) => {
-                    println!("WARNING: mic short read {got}/{expected} bytes — frame dropped");
+                    crate::log!("WARNING: mic short read {got}/{expected} bytes — frame dropped");
                     continue;
                 }
                 Err(e) => {
-                    println!("ERROR: {e} — retrying in 20 ms (task neither blocks nor spins)");
+                    crate::log!("ERROR: {e} — retrying in 20 ms (task neither blocks nor spins)");
                     std::thread::sleep(Duration::from_millis(20));
                     continue;
                 }
@@ -484,24 +484,12 @@ impl<'d> MicCapture<'d> {
             log.second_frames += 1;
             log.frames_total += 1;
 
-            // Plan Do (c): log per-frame stats.
-            println!(
-                "mic-f: mean={:.1} rms_dbfs={:.1} stddev={:.1} peak={} crest_db={:.2} distinct={} rail_runs={}",
-                stats.mean,
-                QualityLog::dbfs(stats.rms),
-                stats.stddev,
-                stats.peak,
-                stats.crest_db,
-                stats.distinct,
-                rail_runs
-            );
-
             log.push(FrameRecord { stats, rail_runs });
             log.push_hum(frame);
 
             // ---- deliver to the consumer (Recorder / Todo 10) ----
             if let Err(SendError(_)) = tx.send(*frame) {
-                println!(
+                crate::log!(
                     "mic: frame receiver dropped — capture task exiting after {} frames",
                     log.frames_total
                 );
@@ -570,5 +558,118 @@ mod tests {
         // "≥ 500 valid frames" floor.
         assert_eq!(WINDOW_FRAMES, 500);
         assert_eq!(WINDOW_FRAMES * FRAME_SAMPLES / SAMPLE_RATE_HZ as usize, 10);
+    }
+
+    #[test]
+    fn injected_one_kilohertz_reference_recovers_rms_within_five_percent() {
+        const AMPLITUDE: f32 = 0.5;
+        const TOLERANCE: f32 = 0.05;
+        let mut frame = [0i16; FRAME_SAMPLES];
+        for (index, sample) in frame.iter_mut().enumerate() {
+            let phase = 2.0 * std::f32::consts::PI * 1_000.0 * index as f32
+                / SAMPLE_RATE_HZ as f32;
+            *sample = (AMPLITUDE * i16::MAX as f32 * phase.sin()).round() as i16;
+        }
+
+        let measured = crate::audio_quality::frame_stats(&frame);
+        let expected_rms = AMPLITUDE * i16::MAX as f32 / std::f32::consts::SQRT_2;
+        let relative_error = (measured.rms - expected_rms).abs() / expected_rms;
+        assert!(
+            relative_error <= TOLERANCE,
+            "injected tone RMS {:.2}, expected {:.2}, error {:.2}%",
+            measured.rms,
+            expected_rms,
+            relative_error * 100.0,
+        );
+        assert!((measured.crest_db - 3.0103).abs() < 0.5);
+    }
+
+    #[cfg(target_os = "espidf")]
+    #[test]
+    #[ignore = "HIL: requires live audio input; quiet-room capture is DC-dominated. Run in the HIL suite (plan D)"]
+    fn hil_live_pdm_capture_is_present_and_not_clipped() {
+        use esp_idf_hal::peripherals::Peripherals;
+
+        const FRAME_COUNT: usize = WINDOW_FRAMES;
+        let _guard = crate::HIL_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let peripherals = Peripherals::take().expect("take I2S and GPIO peripherals");
+        let mut capture = MicCapture::new(
+            peripherals.i2s0,
+            peripherals.pins.gpio42,
+            peripherals.pins.gpio41,
+        )
+        .expect("configure PDM RX");
+
+        let mut stats = Vec::with_capacity(FRAME_COUNT);
+        let mut rail_runs = 0;
+        let mut hum_window = Vec::with_capacity(HUM_WINDOW_SAMPLES);
+        let mut hum_ratios = Vec::new();
+        let mut sample_probe = Vec::new();
+        for frame_index in 0..FRAME_COUNT {
+            let frame = capture.read_frame().unwrap_or_else(|error| {
+                panic!("PDM frame {frame_index} read failed: {error}")
+            });
+            if frame_index == 0 {
+                sample_probe.extend_from_slice(&frame[..16]);
+            }
+            stats.push(frame_stats(frame));
+            rail_runs += count_rail_runs(frame, MIN_RAIL_RUN);
+            hum_window.extend_from_slice(frame);
+            if hum_window.len() == HUM_WINDOW_SAMPLES {
+                let tone = goertzel_mag(&hum_window, 1_000.0, SAMPLE_RATE_HZ as f32);
+                let hum_50 = goertzel_mag(&hum_window, 50.0, SAMPLE_RATE_HZ as f32);
+                let hum_60 = goertzel_mag(&hum_window, 60.0, SAMPLE_RATE_HZ as f32);
+                hum_ratios.push((hum_50 / tone, hum_60 / tone));
+                hum_window.clear();
+            }
+        }
+
+        let mean_rms = stats.iter().map(|entry| entry.rms).sum::<f32>() / stats.len() as f32;
+        let rms_dbfs = 20.0 * (mean_rms / i16::MAX as f32).log10();
+        let peak = stats.iter().map(|entry| entry.peak.unsigned_abs()).max().unwrap_or(0);
+        let mut rms_sorted: Vec<f32> = stats.iter().map(|entry| entry.rms).collect();
+        rms_sorted.sort_by(f32::total_cmp);
+        let p95_rms = rms_sorted[(rms_sorted.len() * 95 / 100).min(rms_sorted.len() - 1)];
+        let p95_rms_dbfs = 20.0 * (p95_rms / i16::MAX as f32).log10();
+        let mut dc_ratios: Vec<f32> = stats.iter().map(|entry| entry.mean.abs() / entry.rms.max(1.0)).collect();
+        dc_ratios.sort_by(f32::total_cmp);
+        let p95_dc_ratio = dc_ratios[(dc_ratios.len() * 95 / 100).min(dc_ratios.len() - 1)];
+        let mut crest_sorted: Vec<f32> = stats.iter().map(|entry| entry.crest_db).collect();
+        crest_sorted.sort_by(f32::total_cmp);
+        let median_crest = crest_sorted[crest_sorted.len() / 2];
+        let stddev_positive = stats.iter().filter(|entry| entry.stddev > 0.0).count();
+        let stnr = stnr_snr_db(&stats);
+        let first = stats[0];
+        crate::test_support::rom_print(format_args!(
+            "hil-audio-frame0: mean={} rms={:.2} stddev={:.2} peak={} samples={sample_probe:?}\n",
+            first.mean, first.rms, first.stddev, first.peak
+        ));
+        crate::log!(
+            "hil-audio: frames={} mean_rms_dbfs={rms_dbfs:.2} p95_rms_dbfs={p95_rms_dbfs:.2} \
+             p95_dc_ratio={p95_dc_ratio:.4} median_crest_db={median_crest:.2} peak={peak} \
+             rail_runs={rail_runs} stddev_positive={stddev_positive}/{FRAME_COUNT} stnr={stnr:?} \
+             hum_windows={}",
+            stats.len(),
+            hum_ratios.len(),
+        );
+        crate::test_support::rom_print(format_args!(
+            "hil-audio-values: p95_rms_dbfs={p95_rms_dbfs:.2} dc_ratio={p95_dc_ratio:.4} \
+             median_crest_db={median_crest:.2} peak={peak} rail_runs={rail_runs} \
+             stddev_positive={stddev_positive}/{FRAME_COUNT} stnr={stnr:?} hum_windows={}\n",
+            hum_ratios.len(),
+        ));
+        assert!(p95_rms_dbfs > -50.0, "95th-percentile RMS {p95_rms_dbfs:.2} dBFS below floor");
+        assert!(stddev_positive * 100 >= FRAME_COUNT * 99, "stddev positive only in {stddev_positive}/{FRAME_COUNT} frames");
+        assert!(p95_dc_ratio < 0.05, "95th-percentile |mean|/RMS is {p95_dc_ratio:.4}, limit 0.05");
+        assert_eq!(rail_runs, 0, "capture contains clipped rail runs");
+        assert!(peak < 32_112, "capture peak {peak} is above -0.2 dBFS");
+        assert!(median_crest > 8.0, "median crest factor {median_crest:.2} dB below threshold");
+        let stnr = stnr.expect("500 non-null frames must produce STNR");
+        assert!(stnr.is_finite(), "STNR must be finite");
+        assert!(!hum_ratios.is_empty(), "capture did not produce a 100 ms hum window");
+        assert!(
+            hum_ratios.iter().all(|(hum50, hum60)| hum50.is_finite() && hum60.is_finite()),
+            "hum ratios must be finite"
+        );
     }
 }
