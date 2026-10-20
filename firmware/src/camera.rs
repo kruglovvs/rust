@@ -51,6 +51,10 @@ mod ffi {
         unsafe { ((*fb).buf, (*fb).len, (*fb).width, (*fb).height) }
     }
 
+    pub(super) fn fb_is_external_ram(fb: *mut bindings::camera_fb_t) -> bool {
+        unsafe { esp_idf_sys::esp_ptr_external_ram((*fb).buf.cast()) }
+    }
+
     /// Lifetime `'a` must be constrained by the caller to the lifetime of the
     /// owning [`super::FrameBuffer`]; the driver reuses the memory after return.
     pub(super) fn slice<'a>(buf: *const u8, len: usize) -> &'a [u8] {
@@ -315,6 +319,12 @@ impl FrameBuffer {
     pub fn height(&self) -> usize {
         self.height
     }
+
+    /// Whether the underlying framebuffer address belongs to external RAM.
+    pub fn is_external_ram(&self) -> bool {
+        let fb = self.fb.expect("FrameBuffer used after drop");
+        ffi::fb_is_external_ram(fb)
+    }
 }
 
 impl Drop for FrameBuffer {
@@ -425,5 +435,44 @@ mod tests {
         assert_eq!(classify_frame(&[]), FrameVerdict::RejectTooShort);
         assert_eq!(classify_frame(&[0xFF]), FrameVerdict::RejectTooShort);
         assert_eq!(classify_frame(&[0xD9]), FrameVerdict::RejectTooShort);
+    }
+
+    #[cfg(target_os = "espidf")]
+    #[test]
+    fn hil_sccb_reads_expected_sensor_pid() {
+        let _guard = crate::HIL_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let camera = super::Camera::init(super::CameraConfig::default())
+            .expect("camera init must program sensor over SCCB");
+        let identity = crate::sensor::log_sensor_identity(
+            camera.frames_grabbed(),
+            camera.frames_rejected(),
+        )
+        .expect("read sensor identity over SCCB");
+
+        assert_eq!(identity.class, crate::sensor::SensorId::Ov3660);
+        assert_eq!(identity.pid, crate::sensor::EXPECTED_PID);
+        camera.deinit().expect("camera deinit");
+    }
+
+    #[cfg(target_os = "espidf")]
+    #[test]
+    #[ignore = "known OV3660/esp32-camera#630 NO-EOI on this board; retained as a repro until camera driver/config is corrected"]
+    fn hil_psram_dma_returns_complete_qvga_jpegs() {
+        const FRAMES: usize = 30;
+        const EOI: [u8; 2] = [0xFF, 0xD9];
+
+        let _guard = crate::HIL_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut camera = super::Camera::init(super::CameraConfig::default())
+            .expect("camera init");
+        for frame_index in 0..FRAMES {
+            let frame = camera.grab().unwrap_or_else(|error| {
+                panic!("frame {frame_index} rejected after {} good frames: {error}", camera.frames_grabbed())
+            });
+            assert!(frame.is_external_ram(), "frame {frame_index} is not allocated in PSRAM");
+            assert_eq!(&frame.as_bytes()[frame.len() - 2..], &EOI);
+            assert_eq!((frame.width(), frame.height()), (320, 240));
+        }
+        assert_eq!(camera.frames_rejected(), 0);
+        camera.deinit().expect("camera deinit");
     }
 }

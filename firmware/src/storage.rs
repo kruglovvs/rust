@@ -884,6 +884,10 @@ struct Trial {
 /// Dropping this unmounts (VFS unregistration + `f_mount(NULL)` + SDSPI device
 /// detach) — plan (c)'s "unmount between attempts" discipline, for free.
 pub struct Storage<'d> {
+    /// The mounted FAT filesystem. Deliberately unread today: the accessor that
+    /// the recorder (Todo 10) and the boot wiring (Todo 20) need does not exist
+    /// yet, so this would otherwise be flagged as a dead field.
+    #[allow(dead_code)]
     chain: SdChain<'d>,
     probe: CardProbe,
     cs: CsPin,

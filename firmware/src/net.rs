@@ -392,11 +392,26 @@ mod esp_impl {
     /// `camera.rs` / `storage.rs`).
     mod ffi {
         use esp_idf_svc::sys::{
-            esp_log_level_t_ESP_LOG_INFO as ESP_LOG_INFO, esp_log_write, esp_timer_get_time,
-            esp_wifi_set_ps, heap_caps_get_free_size, heap_caps_get_largest_free_block,
+            esp_event_loop_create_default, esp_log_level_t_ESP_LOG_INFO as ESP_LOG_INFO,
+            esp_log_write, esp_netif_init, esp_timer_get_time, esp_wifi_set_ps,
+            heap_caps_get_free_size, heap_caps_get_largest_free_block,
             wifi_ps_type_t_WIFI_PS_NONE, EspError,
         };
         use std::ffi::CString;
+
+        /// Bring up the LwIP TCP/IP stack and the default event loop.
+        ///
+        /// `esp_netif_init()` is what runs `tcpip_init()`. Without it the very
+        /// first socket operation reaches `tcpip_send_msg_wait_sem()` with an
+        /// mbox that was never created, and ESP-IDF asserts
+        /// `(Invalid mbox)` and aborts — a hard reset, not an `Err`. ESP-IDF
+        /// calls neither of these from startup, so an app (or a test) that
+        /// opens a socket must do it first. Both return `ESP_OK` on a repeat
+        /// call, so callers do not need to guard against double init.
+        pub fn netif_init() -> Result<(), EspError> {
+            EspError::convert(unsafe { esp_netif_init() })?;
+            EspError::convert(unsafe { esp_event_loop_create_default() })
+        }
 
         /// Plan (a): disable Wi-Fi power save before streaming.
         pub fn wifi_disable_power_save() -> Result<(), EspError> {
@@ -450,6 +465,14 @@ mod esp_impl {
         _mdns: EspMdns,
         _artifact: esp_idf_svc::http::server::EspHttpServer<'static>,
         _supervisor: thread::JoinHandle<()>,
+    }
+
+    /// Bring up LwIP so any later socket call has a live TCP/IP mbox. The
+    /// Todo 20 boot path calls this before `bring_up`; on-device tests that
+    /// bind or connect a real socket call it first. Repeat calls are `ESP_OK`,
+    /// so it needs no guard.
+    pub fn ensure_netif_initialised() -> Result<(), EspError> {
+        ffi::netif_init()
     }
 
     static SNTP_HANDLE: Mutex<Option<EspSntp<'static>>> = Mutex::new(None);
@@ -831,7 +854,7 @@ mod esp_impl {
 
 #[cfg(target_os = "espidf")]
 #[allow(unused_imports)] // consumed by the Todo 20 boot wiring
-pub use esp_impl::{bring_up, NetHandles};
+pub use esp_impl::{bring_up, ensure_netif_initialised, NetHandles};
 
 #[cfg(test)]
 mod tests {
