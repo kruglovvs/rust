@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ESP32-S3: Build firmware",
+      "type": "process",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "exec env -i HOME=/home/esp PATH=/home/esp/.cargo/bin:/usr/local/bin:/usr/bin:/bin RUSTUP_HOME=/home/esp/.rustup CARGO_HOME=/home/esp/.cargo IDF_PATH=/opt/esp/idf IDF_TOOLS_PATH=/opt/esp/idf-tools RUSTUP_TOOLCHAIN=esp '${workspaceFolder}/scripts/build-firmware.sh'"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ESP32-S3: Flash firmware over USB-JTAG",
+      "type": "process",
+      "command": "bash",
+      "args": ["${workspaceFolder}/scripts/flash-debug-jtag.sh"],
+      "options": {
+        "env": {
+          "IDF_PATH": "/opt/esp/idf",
+          "IDF_TOOLS_PATH": "/opt/esp/idf-tools"
+        },
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "dependsOn": "ESP32-S3: Build firmware",
+      "dependsOrder": "sequence"
+    }
+  ]
+}
