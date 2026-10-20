@@ -9,15 +9,15 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "chad",
       "options": {
-        "baseURL": "https://ask.chadgpt.ru/api/v1",
-        "apiKey": "chad-cbed6a929fb3a55c8a7f40d7c4d57968f8c9c5029aaa93c46ba55a7a1599542a"
+        "baseURL": "https://elysiumai.garden/v1",
+        "apiKey": "{env:CHAD_API_KEY}"
       },
       "models": {
         "gpt-5.6-sol": { "name": "GPT 5.6 SOL" },
         "gpt-5.6-luna": { "name": "GPT 5.6 LUNA" },
         "gpt-6-luna": { "name": "GPT 6 LUNA" },
         "glm-5.2": { "name": "GLM 5.2" },
-        "claude-5.5-haiku": { "name": "CLAUDE 5.5 HAIKU" },
+        "claude-haiku-5.5": { "name": "CLAUDE 5.5 HAIKU" },
         "claude-5-opus": { "name": "CLAUDE 5 OPUS" },
         "claude-5-sonnet": { "name": "CLAUDE 5 SONNET" },
         "grok-4.5": { "name": "GROK 4.5" }

@@ -46,7 +46,11 @@
             "extensions": [
                 "rust-lang.rust-analyzer",
                 "tamasfe.even-better-toml",
-                "mutantdino.resourcemonitor"
+                "mutantdino.resourcemonitor",
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-extension-pack",
+                "vadimcn.vscode-lldb",
+                "marus25.cortex-debug"
             ]
         }
     }
