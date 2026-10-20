@@ -40,6 +40,15 @@ case "$TIMEOUT_S" in
   ''|*[!0-9]*) echo "run-device-tests: --timeout-seconds must be a positive integer" >&2; exit 6 ;;
 esac
 
+# EVIDENCE is consumed from inside `(cd "$FW" && ...)`, so a relative value
+# would resolve against firmware/ instead of the caller's cwd. Normalise it to
+# an absolute path against the ROOT, which is stable across that subshell.
+case "$EVIDENCE" in
+  /*) ;;
+  *) EVIDENCE="$ROOT/$EVIDENCE" ;;
+esac
+mkdir -p "$EVIDENCE"
+
 ESP_ENV=(env -i HOME=/home/esp
   PATH=/home/esp/.cargo/bin:/usr/local/bin:/usr/bin:/bin
   RUSTUP_HOME=/home/esp/.rustup CARGO_HOME=/home/esp/.cargo
@@ -62,10 +71,17 @@ evaluate() {
   case "$reason" in
     timeout) echo "VERDICT 2 wall-clock timeout after ${TIMEOUT_S}s (results=$results/$expected)"; return 2 ;;
     idle)    echo "VERDICT 3 idle watchdog: no test heartbeat for ${IDLE_S}s (results=$results/$expected)"; return 3 ;;
-    boot)    echo "VERDICT 4 hang/reset: boot banner mid-run (boots=$boots results=$results/$expected)"; return 4 ;;
+    boot)
+      # A boot banner after every expected result line is the normal post-run
+      # reset, not a hang. Only a boot before the results complete is a failure.
+      if [ "$results" -ge "$expected" ] && [ "$panics" -eq 0 ] && [ "$failed" -eq 0 ]; then
+        echo "VERDICT 0 all $expected binaries clean (post-run reset ignored)"
+        return 0
+      fi
+      echo "VERDICT 4 hang/reset: boot banner mid-run (boots=$boots results=$results/$expected)"; return 4 ;;
   esac
 
-  if grep -qE 'Task watchdog got triggered|Guru Meditation|rst:0x[0-9a-fA-F]+ \(' "$log" 2>/dev/null; then
+  if [ "$results" -lt "$expected" ] && grep -qE 'Task watchdog got triggered|Guru Meditation|rst:0x[0-9a-fA-F]+ \(' "$log" 2>/dev/null; then
     echo "VERDICT 4 hang/reset: watchdog or reset banner in serial output (results=$results/$expected)"; return 4
   fi
   if [ "$panics" -gt 0 ]; then
@@ -123,7 +139,17 @@ if ! (cd "$FW" && "${ESP_ENV[@]}" cargo test --no-run --message-format=json >"$B
   echo "run-device-tests: cargo test --no-run failed (see $EVIDENCE/build.err)" >&2
   rm -f "$BUILD_JSON"; exit 6
 fi
-mapfile -t BINS < <(grep -o '"executable":"[^"]*"' "$BUILD_JSON" | sed 's/^"executable":"//;s/"$//')
+# Only TEST-profile artifacts may be flashed. `cargo test --no-run` also emits
+# the ordinary binary, and that binary runs the stub `main()` instead of
+# libtest: it prints "camera bindings present", `app_main` returns, and the run
+# ends with an IDLE0 stack-overflow reset and no `test result:` line.
+#
+# The filter must anchor on the *profile* object. Cargo emits TWO `"test"`
+# booleans per record: `profile.test` (was this built by `cargo test`) and
+# `target.test` (does this target support a harness — true for the ordinary
+# bin too). Matching a bare `"test":true` therefore selects the stub binary as
+# well. `profile` contains no nested braces, so `[^}]*` cannot run past it.
+mapfile -t BINS < <(grep '"profile":{[^}]*"test":true' "$BUILD_JSON" | grep -o '"executable":"[^"]*"' | sed 's/^"executable":"//;s/"$//')
 rm -f "$BUILD_JSON"
 if [ "${#BINS[@]}" -eq 0 ]; then
   echo "run-device-tests: no test binaries produced" >&2; exit 6
