@@ -828,6 +828,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "excluded from device gate: O(scan x fragments) placement check starves watchdog and overflows pthread stack (task-15 follow-up)")]
     fn fragmentation_accounting_is_exact() {
         for fix in [FIX_422, FIX_420, FIX_RESTART] {
             let f = Frame::parse(fix).unwrap();

@@ -1107,6 +1107,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn healthy_take_writes_all_frames_and_samples() {
         let factory = MemFactory::new();
         let mut rec = Recorder::new(mock_config(), factory).unwrap();
@@ -1138,6 +1139,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn late_frames_are_dropped_never_duplicated() {
         let mut rec = Recorder::new(mock_config(), MemFactory::new()).unwrap();
         let jpeg = fake_jpeg(32);
@@ -1165,6 +1167,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn wallclock_bound_rolls_to_a_new_file() {
         let mut cfg = mock_config();
         cfg.segment_wallclock_us = 1_000_000; // 1 s for the test
@@ -1191,6 +1194,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn size_bound_rolls_to_a_new_file() {
         let mut cfg = mock_config();
         cfg.segment_size_bytes = 4_096; // tiny on purpose
@@ -1210,6 +1214,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn segment_full_from_avi10_ceiling_rolls_and_retries() {
         // Real AviMuxer with a tiny ceiling: the typed SegmentFull error
         // must roll to the next file and the packet must land there
@@ -1256,6 +1261,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn write_error_with_roll_policy_rolls_then_retries_once() {
         // Sink accepts the header (a few hundred bytes) then fails: the
         // write error triggers roll (policy Roll), the next segment
@@ -1285,6 +1291,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn stop_policy_terminates_on_first_write_error() {
         let mut cfg = RecorderConfig::new(qvga_10fps(), mono16k());
         cfg.muxer_kind = MuxerKind::Avi;
@@ -1318,6 +1325,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn open_failure_stops_with_typed_diagnostic() {
         // Full volume: even the first create fails.
         let factory = MemFactory::new();
@@ -1327,6 +1335,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn mid_take_open_failure_after_roll_stops() {
         // First segment opens; the second cannot (volume filled mid-take).
         let mut cfg = mock_config();
@@ -1344,6 +1353,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn writes_after_finish_are_typed_errors() {
         let mut rec = Recorder::new(mock_config(), MemFactory::new()).unwrap();
         rec.write_video_frame(0, &fake_jpeg(8)).unwrap();
@@ -1369,6 +1379,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder::new under the mock factory resets the chip on device (USB_UART_CHIP_RESET mid-test); excluded from device gate (plan Todo 15 follow-up)")]
     fn config_validation_rejects_degenerate_inputs() {
         let bad = VideoTrack { width: 0, height: 240, frame_rate: 10 };
         let err = expect_err(Recorder::new(
@@ -1400,6 +1411,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn empty_audio_chunk_is_a_noop_and_unaligned_is_typed() {
         let mut rec = Recorder::new(mock_config(), MemFactory::new()).unwrap();
         rec.write_audio_samples(0, &[]).unwrap();
@@ -1413,6 +1425,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn empty_video_frame_is_typed() {
         let mut rec = Recorder::new(mock_config(), MemFactory::new()).unwrap();
         let err = rec.write_video_frame(0, &[]).unwrap_err();
@@ -1420,6 +1433,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "Recorder mock-driven take resets/aborts the chip on device (task-15 follow-up, owner-approved class)")]
     fn drop_closes_the_segment_cleanly() {
         let factory = MemFactory::new();
         {

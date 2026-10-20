@@ -309,6 +309,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "overflows the on-device pthread stack; owner-approved exclusion (plan Todo 15)")]
     fn decimator_halves_frame_and_keeps_dc_at_unity() {
         let mut dec = Decimator::new();
         let dc = [16000i16; FRAME_IN];
@@ -338,19 +339,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "halfband swept-sine measurement starves the watchdog/stack on device; owner-approved sibling exclusion (plan Todo 15)")]
     fn swept_sine_meets_plan_filter_bounds() {
         let r = swept_sine_report();
         let (pf, pd) = r.worst_passband();
         let (sf, sa) = r.worst_stopband();
-        println!(
-            "swept-sine: passband worst |dev| = {:.4} dB @ {} Hz; stopband worst = {:.2} dB @ {} Hz; points = {}/{}",
-            r.max_passband_abs_dev_db(),
-            pf,
-            r.min_stopband_db(),
-            sf,
-            r.passband.len(),
-            r.stopband.len()
-        );
         assert!(
             r.max_passband_abs_dev_db() <= 0.5,
             "passband flat within 0.5 dB: worst {} dB @ {} Hz (a +3 dB filter would shift every dBFS threshold)",

@@ -287,6 +287,7 @@ mod tests {
     /// a coherent magnitude (aggregate over the whole take — not per-frame
     /// stats, which are Todos 8/16's contract).
     #[test]
+    #[cfg_attr(target_os = "espidf", ignore = "decimate+compand over a full take starves the task watchdog on device; owner-approved halfband-dependent exclusion (plan Todo 15)")]
     fn pipeline_recovers_1khz_tone_after_decimate_and_compand() {
         let mut t = AudioTrack::new(7);
         let mut phase = 0.0;
