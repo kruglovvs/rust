@@ -8,10 +8,65 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 
-# Test headroom: stock 3584 overflows libtest's main; per-test threads need 8 KiB
+# XIAO ESP32S3 Sense has 8 MiB onboard flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# Test headroom: stock 3584 overflows libtest's main; per-test threads need headroom.
+#
+# Todo 23: libtest spawns one pthread per #[test]. `libtest` never sets
+# pthread_attr_setstacksize, so every test thread inherits
+# CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT — that value, not
+# CONFIG_ESP_MAIN_TASK_STACK_SIZE, is what bounds a test body. At 8192 the
+# teardown path (std::rt::thread_cleanup -> vTaskSwitchContext ->
+# vApplicationStackOverflowHook) overflowed and reset the chip, which is why
+# the run never reached a `test result:` line. 32 KiB per thread keeps two
+# concurrent test threads (~64 KiB) inside the 321 KiB of internal SRAM and
+# covers the heaviest frames: AviMuxer::new and the half-band decimator both
+# build multi-kilobyte locals on the stack.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=20000
-CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=32768
+
+# Task-watchdog budget: 30 s, not the 5 s default.
+#
+# libtest's main thread prints every test name and result over the 115200-baud
+# console, and each write holds CPU0 while the UART drains. For a suite of this
+# size that starves IDLE0 — the task the task watchdog actually watches — for
+# longer than 5 s, so the run dies with "Task watchdog got triggered" partway
+# through instead of reaching a `test result:` line. The starvation is an
+# artefact of console bandwidth, not of any test hanging, and raising the
+# budget preserves hang detection (a real deadlock still trips it, and
+# scripts/run-device-tests.sh independently fails a run after 60 s of silence).
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 
 # FAT LFN on heap; camera DMA straight into PSRAM (frees ~30-64 KB internal SRAM)
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_CAMERA_PSRAM_DMA=y
+
+# The camera component uses the legacy I2C driver; ESP-IDF also links the new
+# I2C driver through the HAL dependency graph. No new-driver bus is instantiated
+# by this firmware. Skip the constructor-only coexistence abort so legacy camera
+# SCCB can initialize; any real simultaneous use remains unsupported.
+CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
+
+# Heap poisoning (Todo 23 corruption proof).
+#
+# Two findings are baked into this file's history and must not be undone:
+#
+# 1. This file is reached through the repo-root SYMLINK `sdkconfig.defaults`.
+#    `esp-idf-sys` registers `rerun-if-changed=<workspace>/sdkconfig.defaults`
+#    and resolves `esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]` against
+#    the WORKSPACE directory. When that symlink was replaced by a stale regular
+#    file, every edit made here was silently discarded and the chip kept
+#    building the old values. `git ls-files -s sdkconfig.defaults` must report
+#    mode `120000`. If it reports `100644`, this pipeline is broken again.
+#
+# 2. Comprehensive poisoning poisons every alloc/free. It is the correct setting
+#    for the Todo 23 corruption proof but makes the allocator slow enough to
+#    risk the runner's 60 s idle watchdog on a long suite, so it is OFF for the
+#    normal gate. Re-enable BOTH lines together for the corruption pass:
+#      CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+#      CONFIG_HEAP_POISONING_DISABLED=n
+#    The TLSF `block_locate_free` assert that originally exposed the corruption
+#    is ESP-IDF's own allocator consistency check and fires with poisoning off,
+#    so a clean run with poisoning disabled is still real evidence.
+CONFIG_HEAP_POISONING_DISABLED=y
