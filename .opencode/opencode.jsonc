@@ -10,7 +10,7 @@
       "name": "chad",
       "options": {
         "baseURL": "https://elysiumai.garden/v1",
-        "apiKey": "{env:CHAD_API_KEY}"
+        "apiKey": "sk-aQqWWNAFW4wsErY6StSz0QIicV3WDuLVbFXiiIMXHaPCh9se"
       },
       "models": {
         "gpt-5.6-sol": { "name": "GPT 5.6 SOL" },

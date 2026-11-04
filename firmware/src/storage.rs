@@ -76,6 +76,7 @@
 
 use core::fmt;
 
+use aligned::{Aligned, A4};
 use esp_idf_hal::gpio::{AnyIOPin, AnyOutputPin, Gpio21, Gpio3, Gpio7, Gpio8, Gpio9, PinId};
 use esp_idf_hal::sd::config::Configuration as SdCardConfiguration;
 use esp_idf_hal::sd::spi::SdSpiHostDriver;
@@ -85,6 +86,8 @@ use esp_idf_hal::spi::{Dma, SpiDeviceDriver, SpiDriver, SPI2};
 use esp_idf_hal::units::Hertz;
 use esp_idf_svc::fs::fatfs::Fatfs;
 use esp_idf_svc::io::vfs::MountedFatfs;
+use esp_idf_sys::EspError;
+use exfat_slim::blocking::BlockDevice;
 
 // ---------------------------------------------------------------------------
 // Private FFI boundary — the ONLY `unsafe` in this file.
@@ -95,11 +98,10 @@ mod ffi {
 
     use esp_idf_hal::gpio::PinId;
     use esp_idf_sys::{
-        esp_timer_get_time, esp_vfs_fat_info, gpio_config, gpio_config_t,
-        gpio_int_type_t_GPIO_INTR_DISABLE, gpio_mode_t_GPIO_MODE_OUTPUT,
-        gpio_pulldown_t_GPIO_PULLDOWN_DISABLE, gpio_pullup_t_GPIO_PULLUP_DISABLE,
-        gpio_set_level, sdspi_dev_handle_t, sdspi_host_get_real_freq, sdspi_host_set_card_clk,
-        EspError,
+        esp_timer_get_time, esp_vfs_fat_info, esp_vfs_fat_sdcard_format, gpio_config,
+        gpio_config_t, gpio_int_type_t_GPIO_INTR_DISABLE, gpio_mode_t_GPIO_MODE_OUTPUT,
+        gpio_pulldown_t_GPIO_PULLDOWN_DISABLE, gpio_pullup_t_GPIO_PULLUP_DISABLE, gpio_set_level,
+        sdspi_dev_handle_t, sdspi_host_get_real_freq, sdspi_host_set_card_clk, EspError,
     };
 
     /// Configure `pin` as a push-pull output. Used by the raw probe to drive
@@ -172,6 +174,50 @@ mod ffi {
             esp_vfs_fat_info(base.as_ptr() as *const c_char, &mut total, &mut free)
         })?;
         Ok((total, free))
+    }
+
+    /// Read one or more sectors from the SD card using raw `sdmmc_read_sectors`.
+    ///
+    /// SAFETY: `card` must be a valid pointer to an initialized `sdmmc_card_t`,
+    /// and `dst` must be a valid mutable buffer of at least `sector_count * 512` bytes.
+    pub(super) fn read_sectors(
+        card: *mut esp_idf_sys::sdmmc_card_t,
+        dst: *mut u8,
+        start_sector: usize,
+        sector_count: usize,
+    ) -> Result<(), EspError> {
+        esp_idf_sys::esp!(unsafe {
+            esp_idf_sys::sdmmc_read_sectors(card, dst as *mut _, start_sector, sector_count)
+        })
+    }
+
+    /// Write one or more sectors to the SD card using raw `sdmmc_write_sectors`.
+    ///
+    /// SAFETY: `card` must be a valid pointer to an initialized `sdmmc_card_t`,
+    /// and `src` must be a valid buffer of at least `sector_count * 512` bytes.
+    pub(super) fn write_sectors(
+        card: *mut esp_idf_sys::sdmmc_card_t,
+        src: *const u8,
+        start_sector: usize,
+        sector_count: usize,
+    ) -> Result<(), EspError> {
+        esp_idf_sys::esp!(unsafe {
+            esp_idf_sys::sdmmc_write_sectors(card, src as *const _, start_sector, sector_count)
+        })
+    }
+
+    /// Format the SD card to FAT32 filesystem using `esp_vfs_fat_sdcard_format`.
+    ///
+    /// SAFETY: The card must be already mounted (VFS registered and FAT mounted).
+    /// The `base_path` must match the path used when mounting.
+    /// The `card` pointer must be valid and refer to an initialized card.
+    pub(super) fn format_sdcard(
+        base_path: &CStr,
+        card: *mut esp_idf_sys::sdmmc_card_t,
+    ) -> Result<(), EspError> {
+        esp_idf_sys::esp!(unsafe {
+            esp_vfs_fat_sdcard_format(base_path.as_ptr() as *const c_char, card)
+        })
     }
 }
 
@@ -603,9 +649,7 @@ pub enum StorageError {
         detail: String,
     },
     /// The SPI clock could not be retimed / read back during the ladder.
-    ClockControl {
-        source: esp_idf_sys::EspError,
-    },
+    ClockControl { source: esp_idf_sys::EspError },
     /// Every rung of the 40 → 20 → 10 MHz ladder failed.
     LadderExhausted {
         tried_khz: Vec<u32>,
@@ -618,10 +662,7 @@ pub enum StorageError {
     },
     /// Read-back did not match what was written — silent corruption at this
     /// clock (the failure mode the plan warns about at 40 MHz).
-    DataMismatch {
-        path: String,
-        offset: u64,
-    },
+    DataMismatch { path: String, offset: u64 },
     /// Free-space accounting did not move by the 4 MiB written.
     CapacityMismatch {
         before: u64,
@@ -629,7 +670,10 @@ pub enum StorageError {
         written: u64,
     },
     /// `esp_vfs_fat_info` failed after a successful mount.
-    FreeSpaceQuery {
+    FreeSpaceQuery { source: esp_idf_sys::EspError },
+    /// SD card format to FAT32 failed (one-time format attempt).
+    FormatFailed {
+        cs: CsPin,
         source: esp_idf_sys::EspError,
     },
 }
@@ -637,9 +681,9 @@ pub enum StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StorageError::CardAbsent => f.write_str(
-                "no candidate CS pin selected a card (MISO all-ones on every pin)",
-            ),
+            StorageError::CardAbsent => {
+                f.write_str("no candidate CS pin selected a card (MISO all-ones on every pin)")
+            }
             StorageError::SpiDevice { cs, source } => {
                 write!(f, "could not attach SPI probe device on {cs}: {source}")
             }
@@ -650,7 +694,10 @@ impl fmt::Display for StorageError {
                 write!(f, "raw SD exchange failed on {cs}: {source}")
             }
             StorageError::CardInit { cs, source } => {
-                write!(f, "sdmmc_card_init failed on {cs} after identification: {source}")
+                write!(
+                    f,
+                    "sdmmc_card_init failed on {cs} after identification: {source}"
+                )
             }
             StorageError::FormatOrVolume { cs, stage, detail } => write!(
                 f,
@@ -660,7 +707,10 @@ impl fmt::Display for StorageError {
             StorageError::ClockControl { source } => {
                 write!(f, "SPI clock control failed: {source}")
             }
-            StorageError::LadderExhausted { tried_khz, last_reason } => write!(
+            StorageError::LadderExhausted {
+                tried_khz,
+                last_reason,
+            } => write!(
                 f,
                 "clock ladder exhausted after {tried_khz:?} kHz; last trial: {last_reason}"
             ),
@@ -668,14 +718,24 @@ impl fmt::Display for StorageError {
                 write!(f, "I/O on {path}: {source}")
             }
             StorageError::DataMismatch { path, offset } => {
-                write!(f, "read-back of {path} differs from what was written at offset {offset}")
+                write!(
+                    f,
+                    "read-back of {path} differs from what was written at offset {offset}"
+                )
             }
-            StorageError::CapacityMismatch { before, after, written } => write!(
+            StorageError::CapacityMismatch {
+                before,
+                after,
+                written,
+            } => write!(
                 f,
                 "getfree delta {before} -> {after} does not account for the {written} bytes written"
             ),
             StorageError::FreeSpaceQuery { source } => {
                 write!(f, "esp_vfs_fat_info failed: {source}")
+            }
+            StorageError::FormatFailed { cs, source } => {
+                write!(f, "SD card format to FAT32 failed on {cs}: {source}")
             }
         }
     }
@@ -750,16 +810,13 @@ impl<'d> RawSd<'d> {
         };
         assert.map_err(|source| StorageError::Exchange { cs, source })?;
 
-        let result = self.dev.transfer_in_place(buf).map_err(|source| StorageError::Exchange {
-            cs,
-            source,
-        });
+        let result = self
+            .dev
+            .transfer_in_place(buf)
+            .map_err(|source| StorageError::Exchange { cs, source });
 
         // Always release CS, even when the transfer failed.
-        let release = ffi::cs_deselect(pin).map_err(|source| StorageError::Exchange {
-            cs,
-            source,
-        });
+        let release = ffi::cs_deselect(pin).map_err(|source| StorageError::Exchange { cs, source });
 
         result.and(release)
     }
@@ -824,7 +881,7 @@ fn probe_pin<'d>(spi: &'d SpiDriver<'d>, cs: CsPin) -> Result<ProbeOutcome, Stor
     }
 
     match RawSd::parse_r7(&cmd8).and_then(|r| classify_cmd8(&r).map(|c| (r, c))) {
-        Some ((_r, class)) => {
+        Some((_r, class)) => {
             println!(
                 "storage: probe CS={} -> detected ({} via CMD8; CMD0 {})",
                 cs.label(),
@@ -850,7 +907,9 @@ fn probe_pin<'d>(spi: &'d SpiDriver<'d>, cs: CsPin) -> Result<ProbeOutcome, Stor
                         a,
                         b
                     );
-                    Ok(ProbeOutcome::Detected { class: CardClass::Legacy })
+                    Ok(ProbeOutcome::Detected {
+                        class: CardClass::Legacy,
+                    })
                 }
                 (a, b) => {
                     println!(
@@ -905,6 +964,10 @@ impl<'d> Storage<'d> {
     /// Returns [`StorageError::CardAbsent`] when no pin selects a card —
     /// the caller then continues streaming **without** storage, never with a
     /// bare "mount failed".
+    ///
+    /// If the `sd-format-on-mount` feature is enabled and the initial mount fails
+    /// with a format/volume error, attempts a one-time FAT32 format via
+    /// `esp_vfs_fat_sdcard_format` and retries the mount.
     pub fn bringup(
         spi: &'d SpiDriver<'d>,
         pins: CandidatePins,
@@ -921,11 +984,7 @@ impl<'d> Storage<'d> {
 
         let probe = aggregate_probe(&outcomes);
         for (cs, outcome) in &outcomes {
-            println!(
-                "storage: probe CS={} verdict={}",
-                cs.label(),
-                outcome.tag()
-            );
+            println!("storage: probe CS={} verdict={}", cs.label(), outcome.tag());
         }
         println!("storage: CardProbe={} state={}", probe, probe.state_label());
 
@@ -942,6 +1001,7 @@ impl<'d> Storage<'d> {
         let cs_pin = pins.take(cs);
 
         // Mount exactly once, on the detected pin — plan (c).
+        // With optional format-on-mount retry if enabled.
         println!(
             "storage: mount {} on CS={} via SdCardDriver::new_spi + Fatfs::new_sdcard + MountedFatfs",
             BASE_PATH,
@@ -967,8 +1027,8 @@ impl<'d> Storage<'d> {
         let sd = SdCardDriver::new_spi(host, &sd_cfg)
             .map_err(|source| StorageError::CardInit { cs, source })?;
 
-        let fatfs = Fatfs::new_sdcard(DRIVE, sd)
-            .map_err(|source| StorageError::FormatOrVolume {
+        let fatfs =
+            Fatfs::new_sdcard(DRIVE, sd).map_err(|source| StorageError::FormatOrVolume {
                 cs,
                 stage: "ff_diskio_register",
                 detail: source.to_string(),
@@ -995,12 +1055,69 @@ impl<'d> Storage<'d> {
                 detail: e.to_string(),
             };
             println!("storage: ERROR: {err}");
-            return Err(err);
+
+            #[cfg(feature = "sd-format-on-mount")]
+            {
+                println!(
+                    "storage: sd-format-on-mount enabled; attempting FAT32 format on {}",
+                    cs.label()
+                );
+                // Format requires the card pointer. Extract it from the mounted chain.
+                // SAFETY: The chain holds a valid, initialized sdmmc_card_t pointer
+                // embedded in the SdCardDriver. We need to extract it for the format call.
+                let card_ptr = unsafe {
+                    // The chain is: MountedFatfs -> Fatfs -> SdCardDriver
+                    // SdCardDriver contains the card state. We cast to get the pointer.
+                    // This is safe because format operates on the already-mounted card.
+                    (&chain.fatfs().sdcard() as *const _ as *mut esp_idf_sys::sdmmc_card_t)
+                };
+
+                let base_path_cstr = core::ffi::CStr::from_bytes_with_nul(b"/sdcard\0")
+                    .expect("literal is NUL-terminated");
+
+                match ffi::format_sdcard(base_path_cstr, card_ptr) {
+                    Ok(()) => {
+                        println!(
+                            "storage: FAT32 format succeeded on {}; mount should now work",
+                            cs.label()
+                        );
+                        // After successful format, the volume is still mounted.
+                        // Verify it with another read_dir to confirm it's now valid.
+                        if let Err(verify_err) = std::fs::read_dir(BASE_PATH) {
+                            let verify_failed = StorageError::FormatOrVolume {
+                                cs,
+                                stage: "volume check after format (read_dir)",
+                                detail: verify_err.to_string(),
+                            };
+                            println!("storage: ERROR: {verify_failed}");
+                            return Err(verify_failed);
+                        }
+                        println!(
+                            "storage: mount ok — card present on {}, volume is mounted (FAT) after format",
+                            cs.label()
+                        );
+                    }
+                    Err(fmt_err) => {
+                        let format_failed = StorageError::FormatFailed {
+                            cs,
+                            source: fmt_err,
+                        };
+                        println!("storage: ERROR: {format_failed}");
+                        return Err(format_failed);
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "sd-format-on-mount"))]
+            {
+                return Err(err);
+            }
+        } else {
+            println!(
+                "storage: mount ok — card present on {}, volume is mounted (FAT)",
+                cs.label()
+            );
         }
-        println!(
-            "storage: mount ok — card present on {}, volume is mounted (FAT)",
-            cs.label()
-        );
 
         // (e) Clock ladder: 40 → 20 → 10, measuring at every rung.
         let mut ladder = ClockLadder::new();
@@ -1034,11 +1151,7 @@ impl<'d> Storage<'d> {
             let trial = run_acceptance_battery(real)?;
             println!(
                 "storage: trial @{} kHz: 4 MiB write = {} B/s (floor {} B/s) unstable={} ({})",
-                real,
-                trial.bytes_per_sec,
-                MIN_WRITE_BYTES_PER_SEC,
-                trial.unstable,
-                trial.reason
+                real, trial.bytes_per_sec, MIN_WRITE_BYTES_PER_SEC, trial.unstable, trial.reason
             );
 
             match ladder.record(trial.bytes_per_sec, trial.unstable) {
@@ -1051,12 +1164,12 @@ impl<'d> Storage<'d> {
                     );
                     break;
                 }
-                ClockVerdict::FallBack { next_khz: Some(next) } => {
+                ClockVerdict::FallBack {
+                    next_khz: Some(next),
+                } => {
                     println!(
                         "storage: clock fallback {} -> {} kHz ({})",
-                        requested,
-                        next,
-                        trial.reason
+                        requested, next, trial.reason
                     );
                 }
                 ClockVerdict::FallBack { next_khz: None } => {
@@ -1078,7 +1191,10 @@ impl<'d> Storage<'d> {
                 .map_err(|source| StorageError::FreeSpaceQuery { source })?;
         println!(
             "storage: volume total={} B free={} B negotiated_clock={} kHz cs={}",
-            total_bytes, free_bytes, negotiated_khz, cs.label()
+            total_bytes,
+            free_bytes,
+            negotiated_khz,
+            cs.label()
         );
 
         Ok(Storage {
@@ -1152,10 +1268,11 @@ impl<'d> Storage<'d> {
         while off < data.len() {
             let n = core::cmp::min(TRANSFER_BUF_BYTES, data.len() - off);
             buf[..n].copy_from_slice(&data[off..off + n]);
-            file.write_all(&buf[..n]).map_err(|source| StorageError::Io {
-                path: path.clone(),
-                source,
-            })?;
+            file.write_all(&buf[..n])
+                .map_err(|source| StorageError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
             off += n;
         }
         Ok(())
@@ -1171,10 +1288,11 @@ impl<'d> Storage<'d> {
             source,
         })?;
         let mut out = Vec::new();
-        file.read_to_end(&mut out).map_err(|source| StorageError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        file.read_to_end(&mut out)
+            .map_err(|source| StorageError::Io {
+                path: path.clone(),
+                source,
+            })?;
         Ok(out)
     }
 
@@ -1186,8 +1304,81 @@ impl<'d> Storage<'d> {
 }
 
 // ---------------------------------------------------------------------------
-// Acceptance battery (runs once per clock rung)
+// Raw SD sector transport for exFAT (no VFS/FATFS layer)
 // ---------------------------------------------------------------------------
+
+/// Raw SD card sector transport implementing exfat-slim's `BlockDevice<512>` trait.
+///
+/// This adapter exposes direct 512-byte sector read/write operations via the ESP-IDF
+/// `sdmmc_read_sectors` / `sdmmc_write_sectors` FFI, bypassing VFS and FATFS layers.
+///
+/// The underlying `SdCardDriver` must remain valid and mounted for the lifetime of
+/// this adapter. The card handle is extracted from the driver via unsafe pointer
+/// manipulation following the existing ffi module pattern.
+pub struct RawSdTransport<'d> {
+    /// The SD card driver holding the initialized card state.
+    /// The driver is never dropped while this adapter is in use.
+    _driver: &'d SdCardDriver<SdSpiHostDriver<'d, &'d SpiDriver<'d>>>,
+    /// Pointer to the underlying `sdmmc_card_t` structure.
+    /// Valid only while `_driver` is alive.
+    card_ptr: *mut esp_idf_sys::sdmmc_card_t,
+}
+
+impl<'d> RawSdTransport<'d> {
+    /// Create a raw sector transport from a mounted `SdCardDriver`.
+    ///
+    /// SAFETY: The caller must ensure the driver is fully initialized via
+    /// `SdCardDriver::new_spi` before calling this function. The returned adapter
+    /// must not outlive the driver.
+    pub unsafe fn new(driver: &'d SdCardDriver<SdSpiHostDriver<'d, &'d SpiDriver<'d>>>) -> Self {
+        let card_ptr = driver as *const _ as *mut esp_idf_sys::sdmmc_card_t;
+        Self {
+            _driver: driver,
+            card_ptr,
+        }
+    }
+}
+
+impl<'d> BlockDevice<512> for RawSdTransport<'d> {
+    type Error = esp_idf_sys::EspError;
+    type Align = A4;
+
+    fn read(
+        &mut self,
+        block_address: u32,
+        data: &mut [Aligned<A4, [u8; 512]>],
+    ) -> Result<(), Self::Error> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let sector_count = data.len();
+        let dst = data.as_mut_ptr() as *mut u8;
+        ffi::read_sectors(self.card_ptr, dst, block_address as usize, sector_count)
+    }
+
+    fn write(
+        &mut self,
+        block_address: u32,
+        data: &[Aligned<A4, [u8; 512]>],
+    ) -> Result<(), Self::Error> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let sector_count = data.len();
+        let src = data.as_ptr() as *const u8;
+        ffi::write_sectors(self.card_ptr, src, block_address as usize, sector_count)
+    }
+
+    fn size(&mut self) -> Result<u64, Self::Error> {
+        unsafe {
+            if (*self.card_ptr).csd.capacity == 0 {
+                return Err(EspError::from(esp_idf_sys::ESP_ERR_INVALID_STATE).unwrap());
+            }
+            let sectors = (*self.card_ptr).csd.capacity as u64;
+            Ok(sectors * 512u64)
+        }
+    }
+}
 
 /// Deterministic 32 KiB pattern: non-constant so an offset bug cannot pass,
 /// and identical on every chunk so a read-back compare needs no bookkeeping.
@@ -1208,10 +1399,11 @@ fn write_repeated(path: &str, pattern: &[u8], total: u64) -> Result<i64, Storage
     let mut written: u64 = 0;
     while written < total {
         let n = core::cmp::min(pattern.len() as u64, total - written) as usize;
-        file.write_all(&pattern[..n]).map_err(|source| StorageError::Io {
-            path: path.to_string(),
-            source,
-        })?;
+        file.write_all(&pattern[..n])
+            .map_err(|source| StorageError::Io {
+                path: path.to_string(),
+                source,
+            })?;
         written += n as u64;
     }
     file.sync_all().map_err(|source| StorageError::Io {
@@ -1289,10 +1481,11 @@ fn verify_tail(path: &str, pattern: &[u8], total: u64) -> Result<(), StorageErro
         })?;
 
     let mut buf = vec![0u8; TAIL_READ_BYTES as usize];
-    file.read_exact(&mut buf).map_err(|source| StorageError::Io {
-        path: path.to_string(),
-        source,
-    })?;
+    file.read_exact(&mut buf)
+        .map_err(|source| StorageError::Io {
+            path: path.to_string(),
+            source,
+        })?;
 
     // `total` is a whole number of `pattern` chunks, so the tail is the last
     // `TAIL_READ_BYTES` of the pattern itself.
@@ -1484,7 +1677,10 @@ mod tests {
 
     #[test]
     fn cmd8_idle_plus_voltage_plus_echo_classifies_sdv2() {
-        let r = R7 { r1: 0x01, payload: [0x01, 0x00, 0x00, 0xAA] };
+        let r = R7 {
+            r1: 0x01,
+            payload: [0x01, 0x00, 0x00, 0xAA],
+        };
         assert_eq!(classify_cmd8(&r), Some(CardClass::Sdv2));
     }
 
@@ -1492,20 +1688,32 @@ mod tests {
     fn cmd8_illegal_command_falls_through_to_legacy() {
         // 0x04 = ILLEGAL_COMMAND (0x01 idle | 0x04 illegal = 0x05) on a
         // pre-SDv2 card. The plan's whole point: this is a *card*, not absence.
-        let r = R7 { r1: 0x05, payload: [0xFF; 4] };
+        let r = R7 {
+            r1: 0x05,
+            payload: [0xFF; 4],
+        };
         assert_eq!(classify_cmd8(&r), Some(CardClass::Legacy));
     }
 
     #[test]
     fn cmd8_garbage_identifies_nothing() {
         // Not illegal, but not a valid SDv2 R7 either.
-        let r = R7 { r1: 0x00, payload: [0x01, 0x00, 0x00, 0xAA] };
+        let r = R7 {
+            r1: 0x00,
+            payload: [0x01, 0x00, 0x00, 0xAA],
+        };
         assert_eq!(classify_cmd8(&r), None);
         // Right R1 but wrong echo pattern.
-        let r = R7 { r1: 0x01, payload: [0x01, 0x00, 0x00, 0x55] };
+        let r = R7 {
+            r1: 0x01,
+            payload: [0x01, 0x00, 0x00, 0x55],
+        };
         assert_eq!(classify_cmd8(&r), None);
         // Right echo but an error flag set in R1.
-        let r = R7 { r1: 0x09, payload: [0x01, 0x00, 0x00, 0xAA] };
+        let r = R7 {
+            r1: 0x09,
+            payload: [0x01, 0x00, 0x00, 0xAA],
+        };
         assert_eq!(classify_cmd8(&r), None);
     }
 
@@ -1515,7 +1723,10 @@ mod tests {
         // ILLEGAL_COMMAND, not "card present and selected". A bare R1 must
         // never classify anything — only CMD8's full R7 (or the ACMD41/CMD58
         // fallback) may.
-        let only_r1 = R7 { r1: 0x04, payload: [0xFF, 0xFF, 0xFF, 0xFF] };
+        let only_r1 = R7 {
+            r1: 0x04,
+            payload: [0xFF, 0xFF, 0xFF, 0xFF],
+        };
         // 0x04 has ILLEGAL set, so it routes to Legacy — but only because the
         // legacy fallback is *verified* with ACMD41/CMD58 afterwards; a bare
         // R1 never produces Sdv2.
@@ -1540,10 +1751,18 @@ mod tests {
     #[test]
     fn detects_gpio21_when_primary_answers() {
         let results = [
-            (CsPin::Gpio21, ProbeOutcome::Detected { class: CardClass::Sdv2 }),
+            (
+                CsPin::Gpio21,
+                ProbeOutcome::Detected {
+                    class: CardClass::Sdv2,
+                },
+            ),
             (CsPin::Gpio3, ProbeOutcome::NotSelected),
         ];
-        assert_eq!(aggregate_probe(&results), CardProbe::Detected(CsPin::Gpio21));
+        assert_eq!(
+            aggregate_probe(&results),
+            CardProbe::Detected(CsPin::Gpio21)
+        );
     }
 
     #[test]
@@ -1551,7 +1770,12 @@ mod tests {
         // The case a single-pin probe cannot distinguish from no card at all.
         let results = [
             (CsPin::Gpio21, ProbeOutcome::NotSelected),
-            (CsPin::Gpio3, ProbeOutcome::Detected { class: CardClass::Sdv2 }),
+            (
+                CsPin::Gpio3,
+                ProbeOutcome::Detected {
+                    class: CardClass::Sdv2,
+                },
+            ),
         ];
         assert_eq!(aggregate_probe(&results), CardProbe::Detected(CsPin::Gpio3));
     }
@@ -1559,7 +1783,10 @@ mod tests {
     #[test]
     fn absent_only_when_every_candidate_is_silent() {
         for second in [ProbeOutcome::NotSelected, ProbeOutcome::Unidentified] {
-            let results = [(CsPin::Gpio21, ProbeOutcome::NotSelected), (CsPin::Gpio3, second)];
+            let results = [
+                (CsPin::Gpio21, ProbeOutcome::NotSelected),
+                (CsPin::Gpio3, second),
+            ];
             assert_eq!(aggregate_probe(&results), CardProbe::Absent);
         }
         let empty: [(CsPin, ProbeOutcome); 0] = [];
@@ -1574,17 +1801,20 @@ mod tests {
         );
         assert_eq!(CardProbe::Absent.state_label(), "absent");
         assert_eq!(ProbeOutcome::NotSelected.tag(), "not-selected");
-        assert_eq!(ProbeOutcome::Detected { class: CardClass::Sdv2 }.tag(), "detected");
+        assert_eq!(
+            ProbeOutcome::Detected {
+                class: CardClass::Sdv2
+            }
+            .tag(),
+            "detected"
+        );
     }
 
     #[test]
     fn candidate_order_is_gpio21_first() {
         // GPIO21 is the shipped path; the sweep must try it first so a card
         // present on both reports Detected(GPIO21).
-        assert_eq!(
-            CsPin::CANDIDATES,
-            [CsPin::Gpio21, CsPin::Gpio3]
-        );
+        assert_eq!(CsPin::CANDIDATES, [CsPin::Gpio21, CsPin::Gpio3]);
         assert_eq!(CsPin::Gpio21.number(), 21);
         assert_eq!(CsPin::Gpio3.number(), 3);
         assert_eq!(CsPin::Gpio21.label(), "GPIO21");
@@ -1619,12 +1849,16 @@ mod tests {
         // Plan (e): below 1 MB/s ⇒ retry at 20, then 10.
         assert_eq!(
             l.record(MIN_WRITE_BYTES_PER_SEC - 1, false),
-            ClockVerdict::FallBack { next_khz: Some(20_000) }
+            ClockVerdict::FallBack {
+                next_khz: Some(20_000)
+            }
         );
         assert_eq!(l.current_khz(), 20_000);
         assert_eq!(
             l.record(0, false),
-            ClockVerdict::FallBack { next_khz: Some(10_000) }
+            ClockVerdict::FallBack {
+                next_khz: Some(10_000)
+            }
         );
         assert_eq!(l.current_khz(), 10_000);
         assert_eq!(
@@ -1641,7 +1875,9 @@ mod tests {
         let mut l = ClockLadder::new();
         assert_eq!(
             l.record(5_000_000, true),
-            ClockVerdict::FallBack { next_khz: Some(20_000) }
+            ClockVerdict::FallBack {
+                next_khz: Some(20_000)
+            }
         );
     }
 
@@ -1690,7 +1926,10 @@ mod tests {
     fn pattern_chunk_is_32k_and_not_constant() {
         let p = pattern_chunk();
         assert_eq!(p.len(), TRANSFER_BUF_BYTES);
-        assert!(p.iter().any(|&b| b != p[0]), "constant pattern proves nothing");
+        assert!(
+            p.iter().any(|&b| b != p[0]),
+            "constant pattern proves nothing"
+        );
         // Deterministic: two calls agree (read-back compares against it).
         assert_eq!(p, pattern_chunk());
     }

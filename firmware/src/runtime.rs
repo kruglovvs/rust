@@ -13,6 +13,8 @@ use crate::rtsp::service::Service;
 use crate::sensor;
 use crate::storage::{self, Storage};
 
+include!(concat!(env!("OUT_DIR"), "/wifi_credentials.rs"));
+
 const FRAME_RATE: u32 = 10;
 const FRAME_PERIOD: Duration = Duration::from_millis(100);
 const RECORD_DIR: &str = "rec";
@@ -186,8 +188,8 @@ fn open_recorder(mount: &str) -> Result<Recorder, crate::recorder::RecorderError
 }
 
 fn network_config() -> Option<NetConfig> {
-    let ssid = std::env::var("ESP32_WIFI_SSID").ok()?;
-    let password = std::env::var("ESP32_WIFI_PASSWORD").ok()?;
+    let ssid = WIFI_SSID?.to_owned();
+    let password = WIFI_PASSWORD?.to_owned();
     let credentials = WifiCredentials::new(ssid, password);
     if let Err(error) = credentials.validate() {
         crate::log!("boot: WARNING: invalid Wi-Fi credentials: {error}");

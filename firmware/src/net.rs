@@ -392,7 +392,7 @@ mod esp_impl {
     /// `camera.rs` / `storage.rs`).
     mod ffi {
         use esp_idf_svc::sys::{
-            esp_event_loop_create_default, esp_log_level_t_ESP_LOG_INFO as ESP_LOG_INFO,
+            esp_log_level_t_ESP_LOG_INFO as ESP_LOG_INFO,
             esp_log_write, esp_netif_init, esp_timer_get_time, esp_wifi_set_ps,
             heap_caps_get_free_size, heap_caps_get_largest_free_block,
             wifi_ps_type_t_WIFI_PS_NONE, EspError,
@@ -401,16 +401,11 @@ mod esp_impl {
 
         /// Bring up the LwIP TCP/IP stack and the default event loop.
         ///
-        /// `esp_netif_init()` is what runs `tcpip_init()`. Without it the very
-        /// first socket operation reaches `tcpip_send_msg_wait_sem()` with an
-        /// mbox that was never created, and ESP-IDF asserts
-        /// `(Invalid mbox)` and aborts — a hard reset, not an `Err`. ESP-IDF
-        /// calls neither of these from startup, so an app (or a test) that
-        /// opens a socket must do it first. Both return `ESP_OK` on a repeat
-        /// call, so callers do not need to guard against double init.
+        /// `esp_netif_init()` runs `tcpip_init()`. The system event loop is
+        /// created separately by `EspSystemEventLoop::take()` in the Wi-Fi
+        /// bring-up path.
         pub fn netif_init() -> Result<(), EspError> {
-            EspError::convert(unsafe { esp_netif_init() })?;
-            EspError::convert(unsafe { esp_event_loop_create_default() })
+            EspError::convert(unsafe { esp_netif_init() })
         }
 
         /// Plan (a): disable Wi-Fi power save before streaming.
