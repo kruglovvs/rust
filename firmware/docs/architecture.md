@@ -1,6 +1,18 @@
-# ESP32-S3 A/V Architecture
+# ESP32-S3 A/V Firmware Architecture
 
 Status: current source reference, 2026-10-18.
+
+## Three Hardware Facts (Decisive Constraints)
+
+These facts eliminate options rather than enable them. Every major design choice stems from one or more of these constraints.
+
+1. **The ESP32-S3 has no hardware H.264 encoder.** Software H.264 encoding cannot run alongside Wi-Fi on this chip. Therefore, the only real-time video format is MJPEG — which the OV3660 encodes in silicon. Frames leave the sensor already JPEG-compressed; the MCU never runs a JPEG encoder.
+
+2. **WebM cannot carry MJPEG.** The WebM specification allows only VP8/VP9/AV1 video codecs. The Rust `webm` crate's `VideoCodecId` is literally `{ VP8, VP9, AV1 }`. AVI is the achievable container for MJPEG + PCM audio.
+
+3. **OV3660 encodes JPEG in silicon, not software.** The sensor emits complete JFIF files at the configured quality level. Frames are reached via DMA into PSRAM and are immediately ready for packetization or recording without re-encoding.
+
+---
 
 The ESP32-S3 is the RTSP server. A client on the same LAN connects directly to
 the board's private IP. There is no public endpoint, relay, or reverse proxy.

@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["firmware"]
+
+[workspace.package]
+rust-version = "1.85"
