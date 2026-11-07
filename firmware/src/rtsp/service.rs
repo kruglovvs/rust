@@ -45,14 +45,17 @@ const ACCEPT_POLL: Duration = Duration::from_millis(50);
 /// the heaviest test frames (AviMuxer construction, the half-band decimator)
 /// overflow the 8 KiB the default used to be. But ESP-IDF allocates every
 /// pthread stack with `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT` (see
-/// `components/pthread/pthread.c`) — never PSRAM — so each service thread would
-/// also claim 32 KiB out of the ~321 KiB of internal SRAM, and the connect
-/// thread's `spawn` starts failing on memory pressure. A failed spawn drops the
-/// accepted `TcpStream`, which the peer sees as an abortive close: the client
-/// gets `ECONNRESET` reading a response the server never sent. These threads
-/// are control-plane with shallow frames, so 12 KiB is ample and leaves the
-/// test threads their headroom.
-const SERVICE_THREAD_STACK: usize = 12 * 1024;
+/// `components/pthread/pthread.c`) — never PSRAM — so it must find one
+/// contiguous internal block of this size. Measured on the XIAO ESP32-S3
+/// after Wi-Fi + mDNS + SNTP: ~23 KiB internal free but the largest block is
+/// only ~8 KiB (fragmented), so a 12 KiB request fails in `pthread_create`
+/// with ENOMEM and the RTSP listener never starts. These are control-plane
+/// threads with shallow frames (response bodies live in heap `Vec`/`String`),
+/// so 6 KiB stays inside the measured largest block and leaves headroom.
+///
+/// A failed per-connection spawn drops the accepted `TcpStream`, which the
+/// peer sees as an abortive close; the same headroom therefore applies there.
+const SERVICE_THREAD_STACK: usize = 6 * 1024;
 
 // AtomicU32, not AtomicU64: xtensa has no 64-bit atomics (ESP32-S3 is a
 // 32-bit target) — connection ids are widened to u64 at the API boundary.
@@ -173,16 +176,36 @@ impl Service {
     /// optional UDP RTCP/RTP sockets, and start the accept loop. Returns
     /// immediately; the caller holds the handle for the process lifetime.
     pub fn spawn(port: u16) -> io::Result<Self> {
-        let listener = TcpListener::bind(("0.0.0.0", port))?;
-        let local_addr = listener.local_addr()?;
-        listener.set_nonblocking(true)?;
+        Self::spawn_inner(port, true)
+    }
 
-        let udp_rtp = UdpSocket::bind(("0.0.0.0", 0)).ok().map(Arc::new);
-        let udp_rtcp = UdpSocket::bind(("0.0.0.0", 0)).ok().map(Arc::new);
+    /// Bind only the TCP listener, skipping the two UDP sockets.
+    ///
+    /// Escape hatch for internal-heap pressure (bug-mindmap B2): the RTSP
+    /// control-plane endpoint still exists, but RTP/RTCP over UDP is disabled
+    /// (session `Transport:` falls back to TCP interleaving). Callers should
+    /// log that the UDP sockets were skipped.
+    pub fn spawn_tcp_only(port: u16) -> io::Result<Self> {
+        Self::spawn_inner(port, false)
+    }
+
+    fn spawn_inner(port: u16, with_udp: bool) -> io::Result<Self> {
+        let listener = step("tcp bind", TcpListener::bind(("0.0.0.0", port)))?;
+        let local_addr = step("listener local_addr", listener.local_addr())?;
+        step("listener set_nonblocking", listener.set_nonblocking(true))?;
+
+        let (udp_rtp, udp_rtcp) = if with_udp {
+            (
+                UdpSocket::bind(("0.0.0.0", 0)).ok().map(Arc::new),
+                UdpSocket::bind(("0.0.0.0", 0)).ok().map(Arc::new),
+            )
+        } else {
+            (None, None)
+        };
         let udp_ports = match (&udp_rtp, &udp_rtcp) {
             (Some(a), Some(b)) => Some((
-                a.local_addr()?.port(),
-                b.local_addr()?.port(),
+                step("udp rtp local_addr", a.local_addr())?.port(),
+                step("udp rtcp local_addr", b.local_addr())?.port(),
             )),
             _ => None,
         };
@@ -198,7 +221,10 @@ impl Service {
             thread::Builder::new()
                 .name("rtsp-accept".into())
                 .stack_size(SERVICE_THREAD_STACK)
-                .spawn(move || accept_loop(listener, server, shutdown, udp_rtp, udp_rtcp))?
+                .spawn(move || accept_loop(listener, server, shutdown, udp_rtp, udp_rtcp))
+                .map_err(|e| {
+                    io::Error::new(e.kind(), format!("accept thread spawn: {e}"))
+                })?
         };
 
         println!(
@@ -244,6 +270,12 @@ impl Drop for Service {
 }
 
 type UdpShared = Option<Arc<UdpSocket>>;
+
+/// Prefix errors with the failing syscall: `ENOMEM` alone cannot distinguish a
+/// socket-table failure from a thread-stack allocation failure (bug-mindmap B).
+fn step<T>(what: &'static str, result: io::Result<T>) -> io::Result<T> {
+    result.map_err(|e| io::Error::new(e.kind(), format!("{what}: {e}")))
+}
 
 fn accept_loop(
     listener: TcpListener,

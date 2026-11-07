@@ -55,6 +55,34 @@ mod ffi {
         unsafe { esp_idf_sys::esp_ptr_external_ram((*fb).buf.cast()) }
     }
 
+    /// Snapshot of the driver metadata used by the capture diagnostics.
+    ///
+    /// `esp32-camera`'s `camera_fb_t` has no V4L2-style `index`/`flags`
+    /// fields, so the buffer *pointer* and the driver timestamp are the
+    /// closest observable identity for spotting a wrong/stale buffer (A3).
+    pub(super) struct FbMeta {
+        pub buf: *const u8,
+        pub len: usize,
+        pub format: u32,
+        pub timestamp_sec: i64,
+        pub timestamp_usec: i64,
+        pub external: bool,
+    }
+
+    pub(super) fn fb_meta(fb: *mut bindings::camera_fb_t) -> FbMeta {
+        unsafe {
+            let fb = &*fb;
+            FbMeta {
+                buf: fb.buf.cast(),
+                len: fb.len,
+                format: fb.format,
+                timestamp_sec: fb.timestamp.tv_sec as i64,
+                timestamp_usec: fb.timestamp.tv_usec as i64,
+                external: esp_idf_sys::esp_ptr_external_ram(fb.buf.cast()),
+            }
+        }
+    }
+
     /// Lifetime `'a` must be constrained by the caller to the lifetime of the
     /// owning [`super::FrameBuffer`]; the driver reuses the memory after return.
     pub(super) fn slice<'a>(buf: *const u8, len: usize) -> &'a [u8] {
@@ -274,6 +302,25 @@ pub(crate) fn classify_frame(buf: &[u8]) -> FrameVerdict {
     }
 }
 
+/// First and last four bytes of a frame, zero-padded when it is shorter than
+/// four bytes. The head bytes separate DMA misalignment (A2: not `FF D8`) from
+/// truncation (A1: head good, tail short); the tail bytes show the missing EOI.
+fn head_tail(bytes: &[u8]) -> ([u8; 4], [u8; 4]) {
+    let mut head = [0u8; 4];
+    let mut tail = [0u8; 4];
+    let head_len = bytes.len().min(4);
+    head[..head_len].copy_from_slice(&bytes[..head_len]);
+    let tail_len = bytes.len().min(4);
+    tail[4 - tail_len..].copy_from_slice(&bytes[bytes.len() - tail_len..]);
+    (head, tail)
+}
+
+/// Keep serial readable: log the first ten events of each kind, then every
+/// fiftieth, so a broken stream still shows a sample without flooding UART.
+fn should_log_diag(count: u64) -> bool {
+    count <= 10 || count % 50 == 0
+}
+
 // ---------------------------------------------------------------------------
 // RAII frame buffer
 // ---------------------------------------------------------------------------
@@ -345,6 +392,7 @@ impl Drop for FrameBuffer {
 pub struct Camera {
     frames_grabbed: u64,
     frames_rejected: u64,
+    empty_polls: u64,
 }
 
 impl Camera {
@@ -357,7 +405,7 @@ impl Camera {
         if err != esp_idf_sys::ESP_OK {
             return Err(CameraError::Init(err));
         }
-        Ok(Self { frames_grabbed: 0, frames_rejected: 0 })
+        Ok(Self { frames_grabbed: 0, frames_rejected: 0, empty_polls: 0 })
     }
 
     /// Grab the latest frame. [`GrabError::NoFrame`] when the driver has no
@@ -365,17 +413,60 @@ impl Camera {
     /// validation — the buffer is returned to the driver and counted in
     /// [`Self::frames_rejected`], never forwarded to the caller.
     pub fn grab(&mut self) -> Result<FrameBuffer, GrabError> {
-        let fb = ffi::fb_get().ok_or(GrabError::NoFrame)?;
-        let (buf, len, ..) = ffi::fb_parts(fb);
-        let verdict = classify_frame(ffi::slice(buf, len));
+        let fb = match ffi::fb_get() {
+            Some(fb) => fb,
+            None => {
+                self.empty_polls += 1;
+                if should_log_diag(self.empty_polls) {
+                    crate::log!(
+                        "camera: grab empty #{} — esp_camera_fb_get returned NULL (driver dropped the frame inside cam_hal)",
+                        self.empty_polls
+                    );
+                }
+                return Err(GrabError::NoFrame);
+            }
+        };
+        let meta = ffi::fb_meta(fb);
+        let bytes = ffi::slice(meta.buf, meta.len);
+        let (head, tail) = head_tail(bytes);
+        let verdict = classify_frame(bytes);
         if verdict != FrameVerdict::Accept {
-            // NO-EOI / truncated frame: return it to the driver pool and
-            // count the rejection; do NOT forward.
-            ffi::fb_return(fb);
+            // NO-EOI / truncated frame: log the decisive bytes before the
+            // driver may reuse the buffer, then return it to the pool.
             self.frames_rejected += 1;
+            if should_log_diag(self.frames_rejected) {
+                crate::log!(
+                    "camera: reject #{} {:?} bytesused={} head={:02X?} tail={:02X?} buf={:p} ts={}.{:06} fmt={} ext={}",
+                    self.frames_rejected,
+                    verdict,
+                    meta.len,
+                    head,
+                    tail,
+                    meta.buf,
+                    meta.timestamp_sec,
+                    meta.timestamp_usec,
+                    meta.format,
+                    meta.external
+                );
+            }
+            ffi::fb_return(fb);
             return Err(GrabError::InvalidFrame);
         }
         self.frames_grabbed += 1;
+        if should_log_diag(self.frames_grabbed) {
+            crate::log!(
+                "camera: accept #{} len={} head={:02X?} tail={:02X?} buf={:p} ts={}.{:06} fmt={} ext={}",
+                self.frames_grabbed,
+                meta.len,
+                head,
+                tail,
+                meta.buf,
+                meta.timestamp_sec,
+                meta.timestamp_usec,
+                meta.format,
+                meta.external
+            );
+        }
         Ok(FrameBuffer::new(fb))
     }
 
@@ -409,7 +500,7 @@ impl Camera {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_frame, FrameVerdict};
+    use super::{classify_frame, head_tail, should_log_diag, FrameVerdict};
 
     #[test]
     fn accepts_frame_ending_with_eoi() {
@@ -435,6 +526,32 @@ mod tests {
         assert_eq!(classify_frame(&[]), FrameVerdict::RejectTooShort);
         assert_eq!(classify_frame(&[0xFF]), FrameVerdict::RejectTooShort);
         assert_eq!(classify_frame(&[0xD9]), FrameVerdict::RejectTooShort);
+    }
+
+    #[test]
+    fn head_tail_reports_first_and_last_four_bytes() {
+        let frame = [0xFF, 0xD8, 0xFF, 0xE0, 0x10, 0x20, 0x30, 0xFF, 0xD9];
+        assert_eq!(head_tail(&frame), ([0xFF, 0xD8, 0xFF, 0xE0], [0x30, 0xFF, 0xD9, 0x00]));
+        let frame = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+        assert_eq!(head_tail(&frame), ([0xAA, 0xBB, 0xCC, 0xDD], [0xBB, 0xCC, 0xDD, 0xEE]));
+    }
+
+    #[test]
+    fn head_tail_zero_pads_short_and_empty_frames() {
+        assert_eq!(head_tail(&[0xFF, 0xD8]), ([0xFF, 0xD8, 0x00, 0x00], [0xFF, 0xD8, 0x00, 0x00]));
+        assert_eq!(head_tail(&[]), ([0; 4], [0; 4]));
+    }
+
+    #[test]
+    fn diagnostics_log_first_ten_then_every_fiftieth() {
+        for n in 1..=10 {
+            assert!(should_log_diag(n), "event {n} must be logged");
+        }
+        assert!(!should_log_diag(11));
+        assert!(!should_log_diag(49));
+        assert!(should_log_diag(50));
+        assert!(!should_log_diag(51));
+        assert!(should_log_diag(100));
     }
 
     #[cfg(target_os = "espidf")]

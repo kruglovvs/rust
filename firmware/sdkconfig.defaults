@@ -11,6 +11,21 @@ CONFIG_SPIRAM_USE_MALLOC=y
 # XIAO ESP32S3 Sense has 8 MiB onboard flash.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
+# LwIP socket table (bug-mindmap B1/B3).
+#
+# Default LWIP_MAX_SOCKETS is 10. The Wi-Fi event loop, mDNS, the artifact
+# HTTP server, and SNTP have already claimed entries by the time the RTSP
+# listener binds, so raise it to 16 to leave headroom for the listener and
+# per-connection sockets. The measured RTSP failure turned out to be a
+# pthread stack allocation (B2), not this limit, but the headroom is still
+# required and cheap.
+#
+# LWIP_MAX_LISTENING_TCP exists in components/lwip/Kconfig (range 1..1024)
+# and already defaults to 16 in this IDF; it is set explicitly so a future
+# toolchain default change cannot drop it below the RTSP listener.
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_LWIP_MAX_LISTENING_TCP=16
+
 # Test headroom: stock 3584 overflows libtest's main; per-test threads need headroom.
 #
 # Todo 23: libtest spawns one pthread per #[test]. `libtest` never sets

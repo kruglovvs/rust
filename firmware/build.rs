@@ -19,6 +19,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=../.env");
@@ -42,7 +43,9 @@ fn main() {
 
     match link_args {
         Some((key, value)) => {
-            for arg in shlex_split(&value) {
+            let args = shlex_split(&value);
+            patch_esp32_camera_eoi_scan(&args);
+            for arg in args {
                 // One directive per argument: each value is a single argv item.
                 println!("cargo::rustc-link-arg={arg}");
             }
@@ -57,6 +60,119 @@ fn main() {
             );
         }
     }
+}
+
+/// Replace esp32-camera's tail-only EOI search with a full-frame scan.
+///
+/// The component finalizes `camera_fb_t.len` from the DMA EOF interrupt count
+/// at VSYNC. That count can lag the bytes actually written into the PSRAM
+/// framebuffer (or overrun the real JPEG end), so the EOI marker is often
+/// outside the last `dma_node_buffer_size + 1` bytes. The driver then reports
+/// `NO-EOI` and drops a frame whose bytes are actually complete. Scanning the
+/// whole framebuffer forward from the validated SOI finds the real EOI and
+/// trims `len` to it. This runs the component's own ninja rule so the Rust
+/// link in the same build picks up the rebuilt archive.
+fn patch_esp32_camera_eoi_scan(link_args: &[String]) {
+    let Some(cwd_index) = link_args.iter().position(|arg| arg == "--ldproxy-cwd") else {
+        return;
+    };
+    let Some(build_dir) = link_args.get(cwd_index + 1).map(PathBuf::from) else {
+        return;
+    };
+    let cam_hal = build_dir
+        .join("../managed_components/espressif__esp32-camera/driver/cam_hal.c");
+    let Ok(contents) = fs::read_to_string(&cam_hal) else {
+        println!(
+            "cargo:warning=firmware build.rs: could not read {}; skipping camera EOI patch",
+            cam_hal.display()
+        );
+        return;
+    };
+    if contents.contains("size_t probe_len = cam_obj->fb_size;") {
+        return;
+    }
+    let Some(patched) = rewrite_camera_eoi_scan(&contents) else {
+        println!(
+            "cargo:warning=firmware build.rs: camera EOI scan block not found in {}",
+            cam_hal.display()
+        );
+        return;
+    };
+    if let Err(error) = fs::write(&cam_hal, patched) {
+        println!(
+            "cargo:warning=firmware build.rs: could not write {} ({error}); camera EOI patch skipped",
+            cam_hal.display()
+        );
+        return;
+    }
+
+    let mut path = env::var_os("PATH").unwrap_or_default();
+    if let Some(linker_dir) = link_args
+        .iter()
+        .position(|arg| arg == "--ldproxy-linker")
+        .and_then(|index| link_args.get(index + 1))
+        .and_then(|linker| Path::new(linker).parent())
+    {
+        let mut prefixed = linker_dir.as_os_str().to_owned();
+        prefixed.push(":");
+        prefixed.push(env::var_os("PATH").unwrap_or_default());
+        path = prefixed;
+    }
+    let status = Command::new("ninja")
+        .arg("-C")
+        .arg(&build_dir)
+        .arg("esp-idf/espressif__esp32-camera/libespressif__esp32-camera.a")
+        .env("PATH", path)
+        .status();
+    match status {
+        Ok(status) if status.success() => println!(
+            "cargo:warning=firmware build.rs: patched esp32-camera EOI scan to search the full frame buffer"
+        ),
+        Ok(status) => println!(
+            "cargo:warning=firmware build.rs: esp32-camera rebuild failed ({status}); \
+             the EOI patch may not be linked"
+        ),
+        Err(error) => println!(
+            "cargo:warning=firmware build.rs: could not run ninja ({error}); \
+             the EOI patch may not be linked"
+        ),
+    }
+}
+
+fn rewrite_camera_eoi_scan(contents: &str) -> Option<String> {
+    let original = "\
+                /* Search forward from (JPEG_EOI_MARKER_LEN - 1) bytes before the final
+                 * DMA block. We prefer forward search to pick the earliest EOI in the
+                 * last DMA node, avoiding stale markers from a larger prior frame. */
+                size_t probe_len = eoi_probe_window(cam_obj->dma_node_buffer_size,
+                                                   dma_buffer->len);
+                if (probe_len < JPEG_EOI_MARKER_LEN) {
+                    goto skip_eoi_check;
+                }
+                uint8_t *probe_start = dma_buffer->buf + dma_buffer->len - probe_len;
+                cam_drop_psram_cache(probe_start, probe_len);
+                int off = cam_verify_jpeg_eoi(probe_start, probe_len, true);
+                if (off >= 0) {
+                    offset_e = dma_buffer->len - probe_len + off;
+                }";
+    let patched = "\
+                /* `len` is derived from the DMA EOF interrupt count at VSYNC and
+                 * can lag or overrun the bytes actually written, so the real EOI
+                 * may sit outside the last DMA node. Scan the whole framebuffer
+                 * forward from the validated SOI instead. */
+                size_t probe_len = cam_obj->fb_size;
+                if (probe_len < JPEG_EOI_MARKER_LEN) {
+                    goto skip_eoi_check;
+                }
+                cam_drop_psram_cache(dma_buffer->buf, probe_len);
+                int off = cam_verify_jpeg_eoi(dma_buffer->buf, probe_len, true);
+                if (off >= 0) {
+                    offset_e = off;
+                }";
+    let patched = contents.replace(original, patched);
+    patched
+        .contains("size_t probe_len = cam_obj->fb_size;")
+        .then_some(patched)
 }
 
 /// Enable exFAT in the ESP-IDF FatFs component.
