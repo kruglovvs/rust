@@ -57,7 +57,7 @@ fn r1_is_found_after_ncr_filler_and_never_in_an_all_ones_window() {
 fn cmd8_classification_is_positive_only_for_a_full_valid_r7() {
     let sdv2 = R7 {
         r1: 0x01,
-        payload: [0x01, 0x00, 0x00, 0xAA],
+        payload: [0x00, 0x00, 0x01, 0xAA],
     };
     assert_eq!(classify_cmd8(&sdv2), Some(CardClass::Sdv2));
 
@@ -70,15 +70,15 @@ fn cmd8_classification_is_positive_only_for_a_full_valid_r7() {
     for garbage in [
         R7 {
             r1: 0x00,
-            payload: [0x01, 0x00, 0x00, 0xAA],
+            payload: [0x00, 0x00, 0x01, 0xAA],
         },
         R7 {
             r1: 0x01,
-            payload: [0x01, 0x00, 0x00, 0x55],
+            payload: [0x00, 0x00, 0x01, 0x55],
         },
         R7 {
             r1: 0x09,
-            payload: [0x01, 0x00, 0x00, 0xAA],
+            payload: [0x00, 0x00, 0x01, 0xAA],
         },
     ] {
         assert_eq!(classify_cmd8(&garbage), None, "{garbage:?}");
