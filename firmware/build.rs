@@ -18,11 +18,21 @@
 
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=../.env");
     write_wifi_credentials();
+    patch_fatfs_exfat();
+
+    // ESP-IDF 5.5.2 `sdmmc_card_init` always issues the SDIO CMD5 probe
+    // (`sdmmc_init.c` `sdmmc_init_io`); the inserted card answers it late and
+    // the stale R1 is then read as CMD59's response, aborting init with
+    // ESP_ERR_NOT_SUPPORTED. `storage::ffi::__wrap_sdspi_host_do_transaction`
+    // reports CMD5 unsupported instead (upstream's
+    // CONFIG_SD_ENABLE_SDIO_SUPPORT=n path). ldproxy wraps xtensa GCC, so the
+    // flag needs GCC's `-Wl,` passthrough.
+    println!("cargo:rustc-link-arg=-Wl,--wrap=sdspi_host_do_transaction");
 
     // cargo uppercases metadata keys for the DEP_<LINKS>_<KEY> env var; match
     // on the suffix so casing differences do not matter.
@@ -47,6 +57,92 @@ fn main() {
             );
         }
     }
+}
+
+/// Enable exFAT in the ESP-IDF FatFs component.
+///
+/// ESP-IDF's `components/fatfs/src/ffconf.h` hard-codes `FF_FS_EXFAT 0` and
+/// there is no Kconfig symbol for it, so an exFAT-formatted card fails to
+/// mount with `ENODEV`. This rewrites only the `FF_FS_EXFAT` line to `1` and
+/// writes the file back if it changed. A missing or unwritable IDF tree is
+/// reported as a warning but never fails the build, so hosts without a local
+/// IDF checkout (or with a read-only one) still compile.
+fn patch_fatfs_exfat() {
+    // Re-evaluate this patch when the IDF location changes. Deliberately no
+    // `rerun-if-changed` on the header itself: writing it would retrigger the
+    // build script forever.
+    println!("cargo:rerun-if-env-changed=IDF_PATH");
+
+    let idf_path = env::var_os("IDF_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/esp/idf"));
+    let ffconf = idf_path.join("components/fatfs/src/ffconf.h");
+
+    let contents = match fs::read_to_string(&ffconf) {
+        Ok(contents) => contents,
+        Err(error) => {
+            println!(
+                "cargo:warning=firmware build.rs: could not read {} ({error}); \
+                 skipping ESP-IDF FatFs exFAT patch",
+                ffconf.display()
+            );
+            return;
+        }
+    };
+
+    let mut patched = String::with_capacity(contents.len() + 1);
+    let mut changed = false;
+    for line in contents.split_inclusive('\n') {
+        if !changed {
+            let (body, newline) = match line.strip_suffix('\n') {
+                Some(body) => match body.strip_suffix('\r') {
+                    Some(body) => (body, "\r\n"),
+                    None => (body, "\n"),
+                },
+                None => (line, ""),
+            };
+            if let Some(replacement) = rewrite_exfat_line(body) {
+                patched.push_str(&replacement);
+                patched.push_str(newline);
+                changed = true;
+                continue;
+            }
+        }
+        patched.push_str(line);
+    }
+
+    if !changed {
+        return;
+    }
+
+    match fs::write(&ffconf, patched) {
+        Ok(()) => println!(
+            "cargo:warning=firmware build.rs: patched ESP-IDF FatFs for exFAT \
+             (FF_FS_EXFAT=1) in {}",
+            ffconf.display()
+        ),
+        Err(error) => println!(
+            "cargo:warning=firmware build.rs: could not write {} ({error}); \
+             ESP-IDF FatFs exFAT support may be unavailable",
+            ffconf.display()
+        ),
+    }
+}
+
+/// Rewrite a `#define FF_FS_EXFAT <0>` line to `1`, preserving indentation.
+/// Returns `None` for any other line, so unrelated macros are never touched.
+fn rewrite_exfat_line(line: &str) -> Option<String> {
+    let trimmed_start = line.trim_start();
+    let indent = &line[..line.len() - trimmed_start.len()];
+    let mut parts = trimmed_start.split_whitespace();
+    if parts.next()? != "#define"
+        || parts.next()? != "FF_FS_EXFAT"
+        || parts.next()? != "0"
+        || parts.next().is_some()
+    {
+        return None;
+    }
+    Some(format!("{indent}#define FF_FS_EXFAT\t1"))
 }
 
 /// Minimal `shlex` splitter: whitespace separates tokens, single quotes are

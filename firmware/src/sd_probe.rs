@@ -121,6 +121,10 @@ pub fn legacy_identifies(r1_acmd41: u8, r1_cmd58: u8) -> bool {
 /// - `Sdv2` — R1 = `0x01` (idle, no error flags), voltage accepted `0x01`
 ///   (2.7–3.6 V) and the `0xAA` check pattern echoed. This is the "expect
 ///   `0x01` on SDv2" the plan asks for.
+///
+/// The 32-bit R7 word is `[31:12] reserved | [11:8] voltage | [7:0] echo`,
+/// transmitted MSB first, so the four payload bytes after R1 are
+/// `[0x00, 0x00, voltage, echo]`.
 /// - `Legacy` — R1 has `ILLEGAL_COMMAND` (`0x04`) set: a pre-SDv2 card that
 ///   predates `CMD8`; the caller falls back to `ACMD41`/`CMD58`.
 /// - `None` — the card answered but with a combination that identifies
@@ -129,7 +133,7 @@ pub fn classify_cmd8(reply: &R7) -> Option<CardClass> {
     if reply.r1 & 0x04 != 0 {
         return Some(CardClass::Legacy);
     }
-    if reply.r1 == 0x01 && reply.payload[0] == 0x01 && reply.payload[3] == 0xAA {
+    if reply.r1 == 0x01 && reply.payload[2] == 0x01 && reply.payload[3] == 0xAA {
         return Some(CardClass::Sdv2);
     }
     None
