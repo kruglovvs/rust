@@ -96,13 +96,64 @@ use exfat_slim::blocking::BlockDevice;
 mod ffi {
     use core::ffi::{c_char, c_int, CStr};
 
-    use esp_idf_hal::gpio::PinId;
+    use esp_idf_hal::gpio::{AnyOutputPin, PinId};
     use esp_idf_sys::{
-        esp_timer_get_time, esp_vfs_fat_info, esp_vfs_fat_sdcard_format, gpio_config,
+        esp_err_t, esp_timer_get_time, esp_vfs_fat_info, esp_vfs_fat_sdcard_format, gpio_config,
         gpio_config_t, gpio_int_type_t_GPIO_INTR_DISABLE, gpio_mode_t_GPIO_MODE_OUTPUT,
         gpio_pulldown_t_GPIO_PULLDOWN_DISABLE, gpio_pullup_t_GPIO_PULLUP_DISABLE, gpio_set_level,
-        sdspi_dev_handle_t, sdspi_host_get_real_freq, sdspi_host_set_card_clk, EspError,
+        sdmmc_command_t, sdspi_dev_handle_t, sdspi_host_get_real_freq, sdspi_host_set_card_clk,
+        EspError,
     };
+
+    unsafe extern "C" {
+        fn __real_sdspi_host_do_transaction(
+            handle: sdspi_dev_handle_t,
+            cmdinfo: *mut sdmmc_command_t,
+        ) -> esp_err_t;
+    }
+
+    /// Link-time interposer for `sdspi_host_do_transaction`, installed with
+    /// `-Wl,--wrap=sdspi_host_do_transaction` from `build.rs`.
+    ///
+    /// ESP-IDF 5.5.2 `sdmmc_card_init` always probes SDIO with CMD5
+    /// (`sdmmc_init.c` → `sdmmc_init_io`, `io_supported` hard-coded `true`).
+    /// This card answers CMD5 late: the sdspi transaction times out, and the
+    /// stale R1 (`ILLEGAL_COMMAND`) is then consumed as the response to the
+    /// next command, CMD59 `CRC_ON_OFF`, so `sdmmc_init_spi_crc`
+    /// (`sdmmc_sd.c:613`) returns `ESP_ERR_NOT_SUPPORTED` (0x106). The card
+    /// itself accepts CMD59 (verified: R1 = 0x01 from a clean bus).
+    ///
+    /// Reporting CMD5 as unsupported without touching the bus leaves CMD59 a
+    /// clean response. `sdmmc_init_io` treats any CMD5 error as "not an IO
+    /// card" and carries on with `is_mem = 1`, so this is exactly upstream
+    /// ESP-IDF's `CONFIG_SD_ENABLE_SDIO_SUPPORT=n` path (absent in 5.5.2).
+    ///
+    /// # Safety
+    ///
+    /// Same contract as the wrapped function: `cmdinfo` must be null or a
+    /// valid `sdmmc_command_t`. Non-CMD5 calls are forwarded unchanged.
+    #[no_mangle]
+    pub(super) unsafe extern "C" fn __wrap_sdspi_host_do_transaction(
+        handle: sdspi_dev_handle_t,
+        cmdinfo: *mut sdmmc_command_t,
+    ) -> esp_err_t {
+        if !cmdinfo.is_null() && (*cmdinfo).opcode == esp_idf_sys::SD_IO_SEND_OP_COND {
+            return esp_idf_sys::ESP_ERR_NOT_SUPPORTED;
+        }
+        unsafe { __real_sdspi_host_do_transaction(handle, cmdinfo) }
+    }
+
+    /// Re-create a chip-select output handle after its previous owner (the
+    /// `SdSpiHostDriver` of a failed `sdmmc_card_init`) has been dropped.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no other `AnyOutputPin` for `pin` is alive. The
+    /// card-init retry loop only calls this after `SdCardDriver::new_spi`
+    /// returned `Err` and dropped the host that owned the pin.
+    pub(super) fn steal_output_pin(pin: PinId) -> AnyOutputPin<'static> {
+        unsafe { AnyOutputPin::steal(pin) }
+    }
 
     /// Configure `pin` as a push-pull output. Used by the raw probe to drive
     /// chip-select by hand (the probe device is created with no hardware CS so
@@ -400,130 +451,17 @@ impl fmt::Display for CardProbe {
     }
 }
 
-/// Which generation the responding card announced itself as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CardClass {
-    /// `CMD8` returned a valid R7 → SD Physical Layer spec 2.x (SDv2 / SDHC /
-    /// SDXC).
-    Sdv2,
-    /// `CMD8` answered `ILLEGAL_COMMAND`, so identification fell through to
-    /// `ACMD41`/`CMD58` → a legacy card.
-    Legacy,
-}
-
-impl fmt::Display for CardClass {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CardClass::Sdv2 => f.write_str("SDv2"),
-            CardClass::Legacy => f.write_str("legacy"),
-        }
-    }
-}
-
-/// Per-candidate CS pin verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProbeOutcome {
-    /// The card completed identification on this CS pin.
-    Detected { class: CardClass },
-    /// MISO stayed all-ones (`0xFF`) for the whole exchange — this CS selects
-    /// nothing: wrong pin, or no card seated.
-    NotSelected,
-    /// Something toggled MISO off all-ones but identification never completed.
-    Unidentified,
-}
-
-impl ProbeOutcome {
-    /// Short token for the per-pin log line.
-    pub const fn tag(&self) -> &'static str {
-        match self {
-            ProbeOutcome::Detected { .. } => "detected",
-            ProbeOutcome::NotSelected => "not-selected",
-            ProbeOutcome::Unidentified => "unidentified",
-        }
-    }
-}
-
-/// The card's answer to one command (R1 plus, for `CMD8`, the R7 payload).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct R7 {
-    /// First byte with its MSB clear — the R1 status byte.
-    pub r1: u8,
-    /// The four R7 payload bytes that follow R1.
-    pub payload: [u8; 4],
-}
+// The hardware-free probe classification lives in its own module so the
+// host harness can compile and test it. Re-exported here so every existing
+// `storage::{...}` path keeps working.
+pub use crate::sd_probe::{
+    aggregate_detected, classify_cmd8, encode_command, find_r1, is_all_ones,
+    legacy_identifies, CardClass, ProbeOutcome, R7,
+};
 
 // ---------------------------------------------------------------------------
-// Pure probe logic (unit-tested without hardware)
+// Aggregate verdict (plan (a))
 // ---------------------------------------------------------------------------
-
-/// Encode one 6-byte SD SPI command frame:
-/// `[0x40|index, arg>>24, arg>>16, arg>>8, arg, crc]`.
-///
-/// Bit 6 is the start bit, bit 5 the transmission bit; the remaining six bits
-/// are the command index. CRC checking is off by default in SPI mode **except
-/// for `CMD0` and `CMD8`**, which therefore need their real CRCs (`0x95`,
-/// `0x87`); every other frame only needs the end bit, `0x01`.
-pub fn encode_command(index: u8, arg: u32, crc: u8) -> [u8; 6] {
-    [
-        0x40 | (index & 0x3F),
-        (arg >> 24) as u8,
-        (arg >> 16) as u8,
-        (arg >> 8) as u8,
-        arg as u8,
-        crc,
-    ]
-}
-
-/// `true` when every byte is `0xFF`.
-///
-/// This is plan (b)'s one reliable no-response signal: with the card's CS
-/// deasserted its MISO is pulled high, so all-ones means *not selected* —
-/// wrong CS or no card.
-pub fn is_all_ones(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && bytes.iter().all(|&b| b == 0xFF)
-}
-
-/// Locate R1 inside a post-command response window.
-///
-/// The card may insert up to 8 `0xFF` (NCR) bytes before answering; R1 is
-/// defined by its clear MSB, and `0xFF` filler has that bit set, so the first
-/// byte with `b & 0x80 == 0` is R1. `None` = the card never answered
-/// (all-ones ⇒ not selected).
-pub fn find_r1(window: &[u8]) -> Option<(usize, u8)> {
-    window
-        .iter()
-        .enumerate()
-        .find(|(_, &b)| b & 0x80 == 0)
-        .map(|(i, &b)| (i, b))
-}
-
-/// Classify an `ACMD41`/`CMD58` exchange on a card that rejected `CMD8`.
-///
-/// Returns `true` when the legacy identification sequence responded sanely.
-pub fn legacy_identifies(r1_acmd41: u8, r1_cmd58: u8) -> bool {
-    // A real answer has R1's MSB clear on both; idle (0x01) on ACMD41 is
-    // expected, and CMD58 must not report ILLEGAL_COMMAND (0x04).
-    r1_acmd41 & 0x80 == 0 && r1_cmd58 & 0x80 == 0 && r1_cmd58 & 0x04 == 0
-}
-
-/// Classify a `CMD8`/`SEND_IF_COND` R7 exchange — plan (b).
-///
-/// - `Sdv2` — R1 = `0x01` (idle, no error flags), voltage accepted `0x01`
-///   (2.7–3.6 V) and the `0xAA` check pattern echoed. This is the "expect
-///   `0x01` on SDv2" the plan asks for.
-/// - `Legacy` — R1 has `ILLEGAL_COMMAND` (`0x04`) set: a pre-SDv2 card that
-///   predates `CMD8`; the caller falls back to `ACMD41`/`CMD58`.
-/// - `None` — the card answered but with a combination that identifies
-///   nothing (caller reports [`ProbeOutcome::Unidentified`]).
-pub fn classify_cmd8(reply: &R7) -> Option<CardClass> {
-    if reply.r1 & 0x04 != 0 {
-        return Some(CardClass::Legacy);
-    }
-    if reply.r1 == 0x01 && reply.payload[0] == 0x01 && reply.payload[3] == 0xAA {
-        return Some(CardClass::Sdv2);
-    }
-    None
-}
 
 /// Fold the per-pin outcomes into the aggregate [`CardProbe`] — plan (a).
 ///
@@ -531,12 +469,10 @@ pub fn classify_cmd8(reply: &R7) -> Option<CardClass> {
 /// both would still be reported as `Detected(GPIO21)`); `Absent` only when
 /// every candidate is `NotSelected`/`Unidentified`.
 pub fn aggregate_probe(results: &[(CsPin, ProbeOutcome)]) -> CardProbe {
-    for (pin, outcome) in results {
-        if matches!(outcome, ProbeOutcome::Detected { .. }) {
-            return CardProbe::Detected(*pin);
-        }
+    match aggregate_detected(results) {
+        Some(pin) => CardProbe::Detected(pin),
+        None => CardProbe::Absent,
     }
-    CardProbe::Absent
 }
 
 /// `bytes * 1e6 / elapsed_us`, saturating at zero elapsed time.
@@ -998,7 +934,7 @@ impl<'d> Storage<'d> {
                 return Err(StorageError::CardAbsent);
             }
         };
-        let cs_pin = pins.take(cs);
+        let mut cs_pin = Some(pins.take(cs));
 
         // Mount exactly once, on the detected pin — plan (c).
         // With optional format-on-mount retry if enabled.
@@ -1012,20 +948,101 @@ impl<'d> Storage<'d> {
         // Plan (e): START at 40 MHz and measure; fall back only after.
         sd_cfg.speed_khz = CLOCK_LADDER_KHZ[0];
 
-        let host = SdSpiHostDriver::new(
-            spi,
-            Some(cs_pin),
-            AnyIOPin::none(),
-            AnyIOPin::none(),
-            AnyIOPin::none(),
-            None,
-        )
-        .map_err(|source| StorageError::CardInit { cs, source })?;
-        // Keep the raw handle so the ladder can retime the live device.
-        let handle = host.handle();
+        // ESP-IDF 5.5.2 `sdmmc_card_init` always sends CMD59 (`CRC_ON_OFF`)
+        // in SPI mode (`sdmmc_init.c` `SDMMC_INIT_STEP(is_spi,
+        // sdmmc_init_spi_crc)`) and treats R1 `ILLEGAL_COMMAND` as fatal
+        // (`sdmmc_sd.c:606`, `sdspi_transaction.c:50-53`). Cheap cards that
+        // hard-wire CRC reject CMD59, and a stale/late response to the
+        // preceding CMD5 (SDIO probe, unconditional in 5.5.2) can make even a
+        // conforming card see `ILLEGAL_COMMAND`. Both are transient/benign:
+        // CRC16 is optional in SPI mode, and upstream ESP-IDF fixes this by
+        // retrying `CRC_ON_OFF` on `ESP_ERR_NOT_SUPPORTED` plus a
+        // `SDMMC_HOST_FLAG_SPI_IGNORE_DATA_CRC` opt-out (neither is present in
+        // 5.5.2 nor reachable through esp-idf-hal 0.47.0). The only lever here
+        // is to run the whole init again after a short delay — the same
+        // "second attempt succeeds" path users report.
+        const CARD_INIT_ATTEMPTS: usize = 4;
+        let mut last_init_error = None;
+        let mut sd = None;
+        let mut sd_handle = None;
 
-        let sd = SdCardDriver::new_spi(host, &sd_cfg)
-            .map_err(|source| StorageError::CardInit { cs, source })?;
+        for attempt in 1..=CARD_INIT_ATTEMPTS {
+            // On a failed attempt `SdCardDriver::new_spi` has already dropped
+            // the host — and with it the owned CS pin handle — so the retry
+            // re-steals that now-unowned GPIO. `cs_pin` covers attempt 1.
+            let pin = cs_pin
+                .take()
+                .unwrap_or_else(|| ffi::steal_output_pin(cs.number()));
+
+            let host = match SdSpiHostDriver::new(
+                spi,
+                Some(pin),
+                AnyIOPin::none(),
+                AnyIOPin::none(),
+                AnyIOPin::none(),
+                None,
+            ) {
+                Ok(host) => host,
+                Err(source) => {
+                    let err = StorageError::CardInit { cs, source };
+                    println!("storage: ERROR: {err}");
+                    return Err(err);
+                }
+            };
+
+            let attempt_handle = host.handle();
+            match SdCardDriver::new_spi(host, &sd_cfg) {
+                Ok(driver) => {
+                    if attempt > 1 {
+                        println!(
+                            "storage: sdmmc_card_init succeeded on attempt {attempt}/{} \
+                             (SPI CRC_ON_OFF retry)",
+                            CARD_INIT_ATTEMPTS
+                        );
+                    }
+                    sd_handle = Some(attempt_handle);
+                    sd = Some(driver);
+                    break;
+                }
+                Err(source) => {
+                    let kind = if source.code() == esp_idf_sys::ESP_ERR_NOT_SUPPORTED {
+                        " (ESP_ERR_NOT_SUPPORTED: an sdmmc_init_* step rejected a command, \
+                         typically CMD59 CRC_ON_OFF)"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "storage: sdmmc_card_init attempt {attempt}/{} failed: {source}{kind}",
+                        CARD_INIT_ATTEMPTS
+                    );
+                    last_init_error = Some(source);
+                    if attempt < CARD_INIT_ATTEMPTS {
+                        std::thread::sleep(core::time::Duration::from_millis(20));
+                    }
+                }
+            }
+        }
+
+        let sd = match sd {
+            Some(sd) => sd,
+            None => {
+                let source = last_init_error.expect("CARD_INIT_ATTEMPTS >= 1 ran an attempt");
+                let suffix = if source.code() == esp_idf_sys::ESP_ERR_NOT_SUPPORTED {
+                    " — ESP-IDF 5.5.2 sdmmc_init_spi_crc (CMD59 CRC_ON_OFF) returned \
+                     ESP_ERR_NOT_SUPPORTED on every attempt; the card rejects CRC enable \
+                     and this IDF version has no Kconfig/flag to skip it \
+                     (fixed upstream by retrying and by SDMMC_HOST_FLAG_SPI_IGNORE_DATA_CRC)"
+                } else {
+                    ""
+                };
+                let err = StorageError::CardInit { cs, source };
+                println!("storage: ERROR: {err}{suffix}");
+                return Err(err);
+            }
+        };
+
+        // Keep the raw handle so the ladder can retime the live device.
+        let handle = sd_handle.expect("successful SdCardDriver::new_spi recorded its handle");
 
         let fatfs =
             Fatfs::new_sdcard(DRIVE, sd).map_err(|source| StorageError::FormatOrVolume {
@@ -1033,6 +1050,42 @@ impl<'d> Storage<'d> {
                 stage: "ff_diskio_register",
                 detail: source.to_string(),
             })?;
+
+        // If format-on-mount is enabled, format the card before mounting.
+        #[cfg(feature = "sd-format-on-mount")]
+        {
+            println!(
+                "storage: sd-format-on-mount enabled; attempting FAT32 format on {} before mount",
+                cs.label()
+            );
+
+            use esp_idf_svc::fs::fatfs::config::{FatFsType, FormatConfiguration};
+
+            let format_config = FormatConfiguration {
+                fs_type: FatFsType::Fat32,
+                ..Default::default()
+            };
+
+            // Use a 4 KiB work buffer for the format operation.
+            let mut work_buf = [0u8; 4096];
+
+            match fatfs.format(&format_config, &mut work_buf) {
+                Ok(()) => {
+                    println!(
+                        "storage: FAT32 format succeeded on {} (before mount)",
+                        cs.label()
+                    );
+                }
+                Err(fmt_err) => {
+                    let format_failed = StorageError::FormatFailed {
+                        cs,
+                        source: fmt_err,
+                    };
+                    println!("storage: ERROR: {format_failed}");
+                    return Err(format_failed);
+                }
+            }
+        }
 
         let chain = MountedFatfs::mount(fatfs, BASE_PATH, MAX_OPEN_FILES).map_err(|source| {
             let e = StorageError::FormatOrVolume {
@@ -1056,60 +1109,16 @@ impl<'d> Storage<'d> {
             };
             println!("storage: ERROR: {err}");
 
-            #[cfg(feature = "sd-format-on-mount")]
-            {
-                println!(
-                    "storage: sd-format-on-mount enabled; attempting FAT32 format on {}",
-                    cs.label()
-                );
-                // Format requires the card pointer. Extract it from the mounted chain.
-                // SAFETY: The chain holds a valid, initialized sdmmc_card_t pointer
-                // embedded in the SdCardDriver. We need to extract it for the format call.
-                let card_ptr = unsafe {
-                    // The chain is: MountedFatfs -> Fatfs -> SdCardDriver
-                    // SdCardDriver contains the card state. We cast to get the pointer.
-                    // This is safe because format operates on the already-mounted card.
-                    (&chain.fatfs().sdcard() as *const _ as *mut esp_idf_sys::sdmmc_card_t)
-                };
-
-                let base_path_cstr = core::ffi::CStr::from_bytes_with_nul(b"/sdcard\0")
-                    .expect("literal is NUL-terminated");
-
-                match ffi::format_sdcard(base_path_cstr, card_ptr) {
-                    Ok(()) => {
-                        println!(
-                            "storage: FAT32 format succeeded on {}; mount should now work",
-                            cs.label()
-                        );
-                        // After successful format, the volume is still mounted.
-                        // Verify it with another read_dir to confirm it's now valid.
-                        if let Err(verify_err) = std::fs::read_dir(BASE_PATH) {
-                            let verify_failed = StorageError::FormatOrVolume {
-                                cs,
-                                stage: "volume check after format (read_dir)",
-                                detail: verify_err.to_string(),
-                            };
-                            println!("storage: ERROR: {verify_failed}");
-                            return Err(verify_failed);
-                        }
-                        println!(
-                            "storage: mount ok — card present on {}, volume is mounted (FAT) after format",
-                            cs.label()
-                        );
-                    }
-                    Err(fmt_err) => {
-                        let format_failed = StorageError::FormatFailed {
-                            cs,
-                            source: fmt_err,
-                        };
-                        println!("storage: ERROR: {format_failed}");
-                        return Err(format_failed);
-                    }
-                }
-            }
-
             #[cfg(not(feature = "sd-format-on-mount"))]
             {
+                return Err(err);
+            }
+
+            #[cfg(feature = "sd-format-on-mount")]
+            {
+                // If format was already attempted before mount and still failed,
+                // report the persistent error.
+                println!("storage: volume still invalid after pre-mount format");
                 return Err(err);
             }
         } else {

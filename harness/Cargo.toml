@@ -52,6 +52,14 @@ path = "tests/task10_recorder.rs"
 name = "task14_net"
 path = "tests/task14_net.rs"
 
+# Task 18: host-executed negative-path matrix for the pure SD probe
+# classifier (`firmware/src/sd_probe.rs`) — command framing, all-ones
+# "not selected", R1 after NCR filler, CMD8/legacy identification, and
+# "absent only when every candidate pin is silent". No esp-idf imports.
+[[test]]
+name = "task18_negative"
+path = "tests/task18_negative.rs"
+
 # Todo 11: the RTSP session layer (request parsing, SDP with the locked codec
 # strings, Transport parsing, single-session dispatch, $-interleaved framing,
 # loopback socket lifecycle) — pure std, host-executed via #[path] include.
@@ -84,6 +92,13 @@ path = "tests/task12_payload.rs"
 [[test]]
 name = "task13_rtcp"
 path = "tests/task13_rtcp.rs"
+
+# Todo 17: host-only end-to-end RTSP client (plain std sockets, no new deps).
+# The live stream test self-skips unless ESP32_RTSP_URL is set; the closed-port
+# and HTTP-content negative tests always run without hardware.
+[[test]]
+name = "e2e_rtsp"
+path = "tests/e2e_rtsp.rs"
 
 # Todo 12 evidence: prints the compander 256-code table, the swept-sine filter
 # response, the PT=0 header byte, the JPEG/RTSP-path loopbacks, and drives the

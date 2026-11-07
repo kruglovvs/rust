@@ -33,6 +33,8 @@ mod sensor;
 #[allow(dead_code)]
 mod session;
 #[allow(dead_code)]
+mod sd_probe;
+#[allow(dead_code)]
 mod storage;
 #[allow(dead_code)]
 #[path = "rtsp/payload/mod.rs"]

@@ -16,3 +16,36 @@ mod net;
 
 #[path = "../../firmware/src/artifact_server.rs"]
 mod artifact_server;
+
+/// Additional rejection cases for the flat artifact namespace. The module's
+/// own suite already covers traversal, separators and control characters;
+/// these are the remaining boundaries that were not exercised anywhere.
+#[test]
+fn artifact_path_rejects_prefix_only_and_stray_escapes() {
+    use artifact_server::{parse_artifact_path, ArtifactPathError};
+
+    assert_eq!(
+        parse_artifact_path("/files"),
+        Err(ArtifactPathError::MissingPrefix),
+        "the prefix requires the trailing slash"
+    );
+    assert_eq!(
+        parse_artifact_path("/files?x"),
+        Err(ArtifactPathError::MissingPrefix)
+    );
+    assert_eq!(
+        parse_artifact_path("/files/?"),
+        Err(ArtifactPathError::EmptyName)
+    );
+    assert_eq!(
+        parse_artifact_path("/files/%"),
+        Err(ArtifactPathError::EncodedEscape),
+        "a bare percent must not be decoded or forwarded"
+    );
+    assert_eq!(
+        parse_artifact_path("/files/a\u{7f}b"),
+        Err(ArtifactPathError::ControlChar),
+        "DEL (0x7F) is a control character too"
+    );
+    assert_eq!(parse_artifact_path("/files/a#frag"), Ok("a"));
+}
