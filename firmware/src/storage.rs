@@ -86,8 +86,6 @@ use esp_idf_hal::spi::{Dma, SpiDeviceDriver, SpiDriver, SPI2};
 use esp_idf_hal::units::Hertz;
 use esp_idf_svc::fs::fatfs::Fatfs;
 use esp_idf_svc::io::vfs::MountedFatfs;
-use esp_idf_sys::EspError;
-use exfat_slim::blocking::BlockDevice;
 
 // ---------------------------------------------------------------------------
 // Private FFI boundary — the ONLY `unsafe` in this file.
@@ -266,21 +264,6 @@ mod ffi {
     ) -> Result<(), EspError> {
         esp_idf_sys::esp!(unsafe {
             esp_idf_sys::sdmmc_read_sectors(card, dst as *mut _, start_sector, sector_count)
-        })
-    }
-
-    /// Write one or more sectors to the SD card using raw `sdmmc_write_sectors`.
-    ///
-    /// SAFETY: `card` must be a valid pointer to an initialized `sdmmc_card_t`,
-    /// and `src` must be a valid buffer of at least `sector_count * 512` bytes.
-    pub(super) fn write_sectors(
-        card: *mut esp_idf_sys::sdmmc_card_t,
-        src: *const u8,
-        start_sector: usize,
-        sector_count: usize,
-    ) -> Result<(), EspError> {
-        esp_idf_sys::esp!(unsafe {
-            esp_idf_sys::sdmmc_write_sectors(card, src as *const _, start_sector, sector_count)
         })
     }
 
@@ -1441,84 +1424,6 @@ impl<'d> Storage<'d> {
         let _ = std::fs::remove_file(&path);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Raw SD sector transport for exFAT (no VFS/FATFS layer)
-// ---------------------------------------------------------------------------
-
-/// Raw SD card sector transport implementing exfat-slim's `BlockDevice<512>` trait.
-///
-/// This adapter exposes direct 512-byte sector read/write operations via the ESP-IDF
-/// `sdmmc_read_sectors` / `sdmmc_write_sectors` FFI, bypassing VFS and FATFS layers.
-///
-/// The underlying `SdCardDriver` must remain valid and mounted for the lifetime of
-/// this adapter. The card handle is extracted from the driver via unsafe pointer
-/// manipulation following the existing ffi module pattern.
-pub struct RawSdTransport<'d> {
-    /// The SD card driver holding the initialized card state.
-    /// The driver is never dropped while this adapter is in use.
-    _driver: &'d SdCardDriver<SdSpiHostDriver<'d, &'d SpiDriver<'d>>>,
-    /// Pointer to the underlying `sdmmc_card_t` structure.
-    /// Valid only while `_driver` is alive.
-    card_ptr: *mut esp_idf_sys::sdmmc_card_t,
-}
-
-impl<'d> RawSdTransport<'d> {
-    /// Create a raw sector transport from a mounted `SdCardDriver`.
-    ///
-    /// SAFETY: The caller must ensure the driver is fully initialized via
-    /// `SdCardDriver::new_spi` before calling this function. The returned adapter
-    /// must not outlive the driver.
-    pub unsafe fn new(driver: &'d SdCardDriver<SdSpiHostDriver<'d, &'d SpiDriver<'d>>>) -> Self {
-        let card_ptr = driver as *const _ as *mut esp_idf_sys::sdmmc_card_t;
-        Self {
-            _driver: driver,
-            card_ptr,
-        }
-    }
-}
-
-impl<'d> BlockDevice<512> for RawSdTransport<'d> {
-    type Error = esp_idf_sys::EspError;
-    type Align = A4;
-
-    fn read(
-        &mut self,
-        block_address: u32,
-        data: &mut [Aligned<A4, [u8; 512]>],
-    ) -> Result<(), Self::Error> {
-        if data.is_empty() {
-            return Ok(());
-        }
-        let sector_count = data.len();
-        let dst = data.as_mut_ptr() as *mut u8;
-        ffi::read_sectors(self.card_ptr, dst, block_address as usize, sector_count)
-    }
-
-    fn write(
-        &mut self,
-        block_address: u32,
-        data: &[Aligned<A4, [u8; 512]>],
-    ) -> Result<(), Self::Error> {
-        if data.is_empty() {
-            return Ok(());
-        }
-        let sector_count = data.len();
-        let src = data.as_ptr() as *const u8;
-        ffi::write_sectors(self.card_ptr, src, block_address as usize, sector_count)
-    }
-
-    fn size(&mut self) -> Result<u64, Self::Error> {
-        unsafe {
-            if (*self.card_ptr).csd.capacity == 0 {
-                return Err(EspError::from(esp_idf_sys::ESP_ERR_INVALID_STATE).unwrap());
-            }
-            let sectors = (*self.card_ptr).csd.capacity as u64;
-            Ok(sectors * 512u64)
-        }
-    }
-}
-
 /// Deterministic 32 KiB pattern: non-constant so an offset bug cannot pass,
 /// and identical on every chunk so a read-back compare needs no bookkeeping.
 fn pattern_chunk() -> Vec<u8> {

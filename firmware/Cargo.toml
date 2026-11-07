@@ -31,9 +31,7 @@ oxideav-core = "=0.1.39"
 # makes the 256-code round-trip error assertion possible. `default-features = false`
 # keeps it dependency-free as the plan specifies.
 audio-codec-algorithms = { version = "=0.8", default-features = false }
-# Raw SD sector transport for exFAT (no VFS/FATFS layer). Pinned to 0.7.0.
-exfat-slim = { version = "=0.7.0", default-features = false }
-# Aligned buffers for BlockDevice trait. Required by exfat-slim's BlockDevice.
+# Aligned sector buffers for the pre-mount filesystem probe.
 aligned = { version = "=0.4", default-features = false }
 
 [features]

@@ -95,15 +95,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
-name = "block-device-driver"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c051592f59fe68053524b4c4935249b806f72c1f544cfb7abe4f57c3be258e"
-dependencies = [
- "aligned",
-]
-
-[[package]]
 name = "bstr"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -621,31 +612,9 @@ dependencies = [
  "esp-idf-hal",
  "esp-idf-svc",
  "esp-idf-sys",
- "exfat-slim",
  "oxideav-avi",
  "oxideav-core",
 ]
-
-[[package]]
-name = "exfat-slim"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5f8b7dcb70b6deb67ef41c3deb17c9e6526262a9764aa9ad0eb4654fa7db890"
-dependencies = [
- "aligned",
- "bitflags 2.13.2",
- "block-device-driver",
- "byteorder",
- "exfat-slim-macros",
- "heapless",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "exfat-slim-macros"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "436575facfb136bbf90bfc0339ab141480868f5821957f1742a035a22bbe1a11"
 
 [[package]]
 name = "fastrand"
