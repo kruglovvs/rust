@@ -272,4 +272,67 @@ mod tests {
         assert_eq!(classify_pid(0x1234), SensorId::Unknown);
         assert_eq!(classify_pid(0xFFFF), SensorId::Unknown);
     }
+
+    /// Hardware presence check: is a camera actually wired to the board?
+    ///
+    /// Reads the sensor's 16-bit PID straight off the SCCB bus (SDA=GPIO40,
+    /// SCL=GPIO39, address 0x3C) so it proves the module is physically
+    /// connected and responding, independently of whether `esp_video`
+    /// managed to register `/dev/video2`.
+    #[cfg(target_os = "espidf")]
+    #[test]
+    fn hil_camera_is_connected_over_sccb() {
+        use esp_idf_hal::delay::BLOCK;
+        use esp_idf_hal::i2c::*;
+        use esp_idf_hal::peripherals::Peripherals;
+
+        const SCCB_ADDR: u8 = 0x3C;
+        const REG_PID_HIGH: [u8; 2] = [0x30, 0x0A];
+        const REG_PID_LOW: [u8; 2] = [0x30, 0x0B];
+
+        let _guard = crate::HIL_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let peripherals = Peripherals::take().expect("take I2C0, SCCB pins and LEDC");
+
+        // The OV3660 will not answer on SCCB until its master clock runs, so
+        // generate XCLK on GPIO10 before probing (same clock esp_video drives).
+        let xclk_timer = esp_idf_hal::ledc::LedcTimerDriver::new(
+            peripherals.ledc.timer0,
+            &esp_idf_hal::ledc::config::TimerConfig::new()
+                .frequency(esp_idf_hal::units::Hertz(20_000_000))
+                .resolution(esp_idf_hal::ledc::config::Resolution::Bits1),
+        )
+        .expect("LEDC timer0 for camera XCLK");
+        let mut xclk = esp_idf_hal::ledc::LedcDriver::new(
+            peripherals.ledc.channel0,
+            xclk_timer,
+            peripherals.pins.gpio10,
+        )
+        .expect("LEDC channel0 on XCLK GPIO10");
+        let half = xclk.get_max_duty() / 2;
+        xclk.set_duty(half).expect("start camera XCLK");
+
+        let mut i2c = I2cDriver::new(
+            peripherals.i2c0,
+            peripherals.pins.gpio40,
+            peripherals.pins.gpio39,
+            &I2cConfig::new().baudrate(esp_idf_hal::units::Hertz(100_000)),
+        )
+        .expect("SCCB I2C0 on SDA=GPIO40 SCL=GPIO39");
+
+        let mut high = [0u8; 1];
+        i2c.write(SCCB_ADDR, &REG_PID_HIGH, BLOCK)
+            .expect("no ACK from the camera on SCCB address 0x3C: camera not connected");
+        i2c.read(SCCB_ADDR, &mut high, BLOCK).expect("read OV3660 PID high byte");
+
+        let mut low = [0u8; 1];
+        i2c.write(SCCB_ADDR, &REG_PID_LOW, BLOCK).expect("select OV3660 PID low byte");
+        i2c.read(SCCB_ADDR, &mut low, BLOCK).expect("read OV3660 PID low byte");
+
+        let pid = (u16::from(high[0]) << 8) | u16::from(low[0]);
+        crate::log!("hil-camera: SCCB addr=0x{SCCB_ADDR:02x} PID=0x{pid:04x}");
+        assert_eq!(
+            pid, EXPECTED_PID,
+            "camera responded on SCCB but its PID is not the expected OV3660"
+        );
+    }
 }
