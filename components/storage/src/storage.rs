@@ -97,7 +97,7 @@ mod ffi {
 
     use esp_idf_hal::gpio::{AnyOutputPin, PinId};
     use esp_idf_sys::{
-        esp_err_t, esp_timer_get_time, esp_vfs_fat_info, esp_vfs_fat_sdcard_format, gpio_config,
+        esp_err_t, esp_timer_get_time, esp_vfs_fat_info, gpio_config,
         gpio_config_t, gpio_int_type_t_GPIO_INTR_DISABLE, gpio_mode_t_GPIO_MODE_OUTPUT,
         gpio_pulldown_t_GPIO_PULLDOWN_DISABLE, gpio_pullup_t_GPIO_PULLUP_DISABLE, gpio_set_level,
         sdmmc_command_t, sdspi_dev_handle_t, sdspi_host_get_real_freq, sdspi_host_set_card_clk,
@@ -264,20 +264,6 @@ mod ffi {
     ) -> Result<(), EspError> {
         esp_idf_sys::esp!(unsafe {
             esp_idf_sys::sdmmc_read_sectors(card, dst as *mut _, start_sector, sector_count)
-        })
-    }
-
-    /// Format the SD card to FAT32 filesystem using `esp_vfs_fat_sdcard_format`.
-    ///
-    /// SAFETY: The card must be already mounted (VFS registered and FAT mounted).
-    /// The `base_path` must match the path used when mounting.
-    /// The `card` pointer must be valid and refer to an initialized card.
-    pub(super) fn format_sdcard(
-        base_path: &CStr,
-        card: *mut esp_idf_sys::sdmmc_card_t,
-    ) -> Result<(), EspError> {
-        esp_idf_sys::esp!(unsafe {
-            esp_vfs_fat_sdcard_format(base_path.as_ptr() as *const c_char, card)
         })
     }
 }
