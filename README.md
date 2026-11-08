@@ -6,34 +6,55 @@ The board is the RTSP server. A client connects to the board's private LAN IP.
 
 ## Current State
 
-Subsystem modules and host tests exist for camera validation, RFC 2435 JPEG
-packetization, PCMU audio, RTSP protocol handling, session policy, SD storage
-policy, and AVI recording. The firmware runtime boot path is still blocked:
-`firmware/src/main.rs` is currently a camera binding smoke test and does not
-start capture, Wi-Fi, SNTP, RTSP, or recording. Do not describe the firmware
-as end-to-end verified.
+The firmware is built on Espressif's ADF/GMF media services, called from Rust
+through bindings generated directly from the C headers (`bindings-gmf.h` →
+`esp_idf_sys::gmf`). There is no hand-written C or C++ shim, and no
+hand-written RTSP, RTP, JPEG, camera, microphone or muxer code.
 
-## Safe Host Checks
+```
+esp_capture_service (DVP OV3660 -> MJPEG, PDM mic -> G711U, AVI muxer)
+    -> esp_media_service_link -> esp_rtsp_service (ROLE_SERVER)
+    -> rtsp://<board-ip>:554/live
+```
 
-These commands do not flash a board, connect to RTSP, or write an SD card:
+`firmware/src/main.rs` is 24 lines; `firmware/src/app.rs` brings up netif,
+storage and Wi-Fi, waits for a station address, then starts `media::Pipeline`
+and idles. Reusable Rust libraries live in `components/{logging,net,storage,media}`.
+
+Verified on hardware: `OPTIONS` returns `200 OK`, `DESCRIBE` returns an SDP
+with `JPEG/90000` and `PCMU/8000`, and a live 10 s session over TCP
+interleaved delivered 504 audio frames and 86 video frames with a 56 ms A/V
+start delta.
+
+Known hardware limitations (see the failure-mode reference):
+
+- About 14% of camera frames arrive without a JPEG SOI and are dropped by
+  `cam_hal`; the rejected payload is garbage rather than zeros.
+- The SD card does not mount, so recording stays disabled
+  (`recording=false`) even though the on-board muxer is configured.
+
+## Build and Host Checks
 
 ```bash
 ./scripts/test-harness.sh
 ./scripts/build-firmware.sh
 ```
 
-The first command runs the host harness. The second builds for
-`xtensa-esp32s3-espidf` and may require the prepared ESP toolchain and ESP-IDF
-installation. Equivalent direct commands are:
+Equivalent direct commands:
 
 ```bash
 (cd harness && cargo test)
 (cd firmware && cargo build --target xtensa-esp32s3-espidf)
 ```
 
-The harness uses its own pinned toolchain. Keep Wi-Fi credentials out of all
-commands, source files, logs, and documentation. Runtime credentials are
-injected by the eventual boot wiring; never add them to `.env` in a commit.
+The harness uses its own pinned toolchain.
+
+## Wi-Fi Credentials
+
+`WIFI_SSID` and `WIFI_PASSWORD` live in `.env` at the repository root and are
+committed deliberately so builds are reproducible; `firmware/build.rs` embeds
+them into `OUT_DIR/wifi_credentials.rs`. `.env.*` remains ignored for
+per-environment overrides. Do not add any other secret to `.env`.
 
 ## Approval Gates
 
@@ -48,12 +69,10 @@ explicit approval for the specific run:
 3. SD tests mount and write the card. They require approval for the card and
    data location because they mutate removable storage.
 
-No flashing, hardware execution, RTSP live test, or SD write has been run for
-the current documentation update. The device test runner also assumes the
-runtime path and reports a blocked or incomplete result while `main.rs` is
-still the smoke test.
+Flashing and the live RTSP session were run with the board attached and the
+user's approval; the measurements above come from that run. No SD write has
+been attempted.
 
 See [the architecture reference](firmware/docs/architecture.md) for data flow
-and exact component versions. See [the failure-mode reference](firmware/docs/failure-modes.md)
-for diagnostics and recovery boundaries. ADR-0001 documents the RFC 2435
-packetization decision.
+and component versions, and [the failure-mode reference](firmware/docs/failure-modes.md)
+for diagnostics and recovery boundaries.
