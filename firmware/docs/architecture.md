@@ -37,7 +37,7 @@ OV3660 camera and PDM microphone
                               +--> mDNS _rtsp._tcp advertisement
 ```
 
-The intended server path is `rtsp://<board-private-ip>:554/mjpeg/1`. The RTSP
+The intended server path is `rtsp://<board-private-ip>:554/live`. The RTSP
 service supports `OPTIONS`, `DESCRIBE`, `SETUP`, `PLAY`, `TEARDOWN`, and
 `GET_PARAMETER`, with one active session. A second client receives RTSP 453
 without changing the first session. The service can negotiate TCP interleaved

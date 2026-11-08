@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! # From /workspaces/rust/harness:
-//! ESP32_RTSP_URL=rtsp://<board-ip>:554/mjpeg/1 \
+//! ESP32_RTSP_URL=rtsp://<board-ip>:554/live \
 //!     cargo test --test e2e_rtsp -- --nocapture
 //! ```
 //!
@@ -657,7 +657,7 @@ fn live_rtsp_stream_meets_frame_and_av_thresholds() {
             println!(
                 "SKIP e2e_rtsp: ESP32_RTSP_URL is not set (or empty) — this live test needs a \
                  running board.\n\
-                 Run it with:\n  ESP32_RTSP_URL=rtsp://<board-ip>:554/mjpeg/1 \\\n      \
+                 Run it with:\n  ESP32_RTSP_URL=rtsp://<board-ip>:554/live \\\n      \
                  cargo test --test e2e_rtsp -- --nocapture\n\
                  Note: live execution is currently blocked because the board's camera returns \
                  no frames and its SD mount fails; see the file header."
@@ -720,7 +720,7 @@ fn live_rtsp_stream_meets_frame_and_av_thresholds() {
 fn closed_port_fails_cleanly_and_promptly() {
     let started = Instant::now();
     let error = match Client::connect(
-        "rtsp://127.0.0.1:1/mjpeg/1",
+        "rtsp://127.0.0.1:1/live",
         Duration::from_secs(2),
         Duration::from_secs(2),
     ) {
@@ -761,7 +761,7 @@ fn http_content_is_rejected_with_a_clear_diagnostic() {
         }
     });
 
-    let url = format!("rtsp://{addr}/mjpeg/1");
+    let url = format!("rtsp://{addr}/live");
     let started = Instant::now();
     let mut client = Client::connect(&url, Duration::from_secs(2), Duration::from_secs(2))
         .expect("connect to the fake HTTP listener");

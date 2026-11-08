@@ -162,8 +162,8 @@ HOST-EXECUTED (this run):
 
 PENDING_NO_BOARD (no serial/Wi-Fi on this container; exact commands):
   - Plan QA-happy: ffmpeg extraction from the LIVE board stream
-      ffprobe rtsp://<ip>:554/mjpeg/1   (Todo 11 gate, board)
-      ffmpeg -i rtsp://<ip>:554/mjpeg/1 -t 10 board-audio.wav
+      ffprobe rtsp://<ip>:554/live   (Todo 11 gate, board)
+      ffmpeg -i rtsp://<ip>:554/live -t 10 board-audio.wav
       ffprobe -show_entries stream=sample_rate board-audio.wav   # expect 8000
     Requires Todo 14 (Wi-Fi) + Todo 11 (server) on the board first —
     Wave order 14 -> 11 -> 12 -> 13; the SDP/PT/WAV path itself is proven

@@ -590,13 +590,13 @@ mod esp_impl {
             "_rtsp",
             "_tcp",
             config.rtsp_port,
-            &[("path", "/mjpeg/1")],
+            &[("path", "/live")],
         )
         .map_err(|_| NetError::MdnsConfig)?;
         ffi::log_info(
             "net",
             &format!(
-                "mdns: hostname={}.local service=_rtsp._tcp port={} txt=path:/mjpeg/1",
+                "mdns: hostname={}.local service=_rtsp._tcp port={} txt=path:/live",
                 config.hostname, config.rtsp_port
             ),
         );
