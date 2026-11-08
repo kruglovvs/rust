@@ -79,7 +79,9 @@
 //! measured analysis cost) run only with a board — see
 //! `.omo/evidence/task-8/serial.log` (PENDING_NO_BOARD).
 
-use crate::audio_quality::{count_rail_runs, frame_stats, goertzel_mag, stnr_snr_db, FrameStats};
+use crate::audio_quality::{
+    count_rail_runs, frame_stats, goertzel_mag, stnr_snr_db, DcBlocker, FrameStats,
+};
 use esp_idf_hal::delay::TickType;
 use esp_idf_hal::gpio::{InputPin, OutputPin};
 use esp_idf_hal::i2s::config::{
@@ -199,6 +201,8 @@ pub struct MicCapture<'d> {
     driver: I2sDriver<'d, I2sRx>,
     bytes: [u8; FRAME_BYTES],
     samples: AudioFrame,
+    /// Removes the PDM path's constant offset before stats and recording.
+    dc_blocker: DcBlocker,
 }
 
 impl<'d> MicCapture<'d> {
@@ -233,7 +237,12 @@ impl<'d> MicCapture<'d> {
             CLK_GPIO, DATA_GPIO, SAMPLE_RATE_HZ, FRAME_SAMPLES, FRAME_BYTES, DMA_DESC_NUM
         );
 
-        Ok(Self { driver, bytes: [0; FRAME_BYTES], samples: [0; FRAME_SAMPLES] })
+        Ok(Self {
+            driver,
+            bytes: [0; FRAME_BYTES],
+            samples: [0; FRAME_SAMPLES],
+            dc_blocker: DcBlocker::new(),
+        })
     }
 
     /// Blocking (bounded) read of exactly one frame. Samples are converted
@@ -259,6 +268,7 @@ impl<'d> MicCapture<'d> {
         for i in 0..FRAME_SAMPLES {
             self.samples[i] = i16::from_le_bytes([self.bytes[2 * i], self.bytes[2 * i + 1]]);
         }
+        self.dc_blocker.process_frame(&mut self.samples[..]);
         Ok(&self.samples)
     }
 }

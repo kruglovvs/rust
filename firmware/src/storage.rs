@@ -1139,7 +1139,9 @@ impl<'d> Storage<'d> {
         );
         let filesystem = detect_filesystem(card);
 
-        let fatfs =
+        // `mut` is only needed by the optional pre-mount format path.
+        #[allow(unused_mut)]
+        let mut fatfs =
             Fatfs::new_sdcard(DRIVE, sd).map_err(|source| StorageError::FormatOrVolume {
                 cs,
                 stage: "ff_diskio_register",
@@ -1977,5 +1979,51 @@ mod tests {
         );
         // Deterministic: two calls agree (read-back compares against it).
         assert_eq!(p, pattern_chunk());
+    }
+
+    /// Destructive, opt-in: reformat the SD card to FAT32 and prove it is
+    /// writable afterwards.
+    ///
+    /// This exists so reformatting is a repeatable command instead of ad-hoc
+    /// code. It is deliberately `#[ignore]`d and feature-gated, because it
+    /// erases the card. Run it with:
+    ///
+    /// ```text
+    /// cargo test --features sd-format-on-mount \
+    ///     --target xtensa-esp32s3-espidf \
+    ///     hil_reformat_sd_card_to_fat32 -- --ignored --nocapture
+    /// ```
+    #[cfg(all(target_os = "espidf", feature = "sd-format-on-mount"))]
+    #[test]
+    #[ignore = "destructive: reformats the SD card to FAT32"]
+    fn hil_reformat_sd_card_to_fat32() {
+        use esp_idf_hal::peripherals::Peripherals;
+
+        let _guard = crate::HIL_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let peripherals = Peripherals::take().expect("take SPIC and SD pins");
+        let bus = super::new_bus(
+            peripherals.spi2,
+            peripherals.pins.gpio7,
+            peripherals.pins.gpio9,
+            peripherals.pins.gpio8,
+        )
+        .expect("SPI2 host bus");
+        let pins = super::CandidatePins::new(peripherals.pins.gpio21, peripherals.pins.gpio3);
+
+        // `bringup` formats first when the feature is on, then mounts and runs
+        // the acceptance battery, so success here means formatted AND usable.
+        let storage = super::Storage::bringup(&bus, pins).expect("format + mount");
+        assert_eq!(storage.base_path(), super::BASE_PATH);
+
+        let probe = b"reformat probe";
+        storage.write_file("reformat-probe.txt", probe).expect("write after reformat");
+        let read_back = storage.read_file("reformat-probe.txt").expect("read after reformat");
+        assert_eq!(read_back.as_slice(), probe, "reformatted volume must round-trip");
+        crate::log!(
+            "hil-sd-format: formatted + writable at {} ({} kHz, {} B free)",
+            storage.base_path(),
+            storage.negotiated_khz(),
+            storage.free_bytes()
+        );
     }
 }

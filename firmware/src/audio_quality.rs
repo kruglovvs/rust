@@ -110,6 +110,52 @@ const MIN_VALID_FRAMES: usize = 500;
 /// broadband audio and would brush the 100 µs analysis gate.
 const DISTINCT_SLOTS: usize = 256;
 
+/// One-pole DC blocker (high-pass) for the PDM capture path.
+///
+/// The PDM RX hardware performs no DC removal, so quiet-room capture sits on a
+/// large constant offset: `|mean| / rms` approaches 1 and crest collapses
+/// toward 0 dB, failing every audio threshold while the microphone works
+/// correctly. This removes the offset before samples reach the statistics or
+/// the recorder.
+///
+/// `y[n] = x[n] - x[n-1] + R * y[n-1]` with `R = 0.995`, i.e. a corner near
+/// 12.7 Hz at 16 kHz, which leaves the speech band and the 1 kHz test tone
+/// essentially untouched.
+#[derive(Debug, Clone)]
+pub struct DcBlocker {
+    prev_x: f32,
+    prev_y: f32,
+}
+
+impl DcBlocker {
+    /// Feedback coefficient; corner ≈ `(1 - R) * fs / (2π)`.
+    pub const R: f32 = 0.995;
+
+    pub const fn new() -> Self {
+        Self { prev_x: 0.0, prev_y: 0.0 }
+    }
+
+    pub fn process(&mut self, sample: i16) -> i16 {
+        let x = f32::from(sample);
+        let y = x - self.prev_x + Self::R * self.prev_y;
+        self.prev_x = x;
+        self.prev_y = y;
+        y.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
+    }
+
+    pub fn process_frame(&mut self, frame: &mut [i16]) {
+        for sample in frame.iter_mut() {
+            *sample = self.process(*sample);
+        }
+    }
+}
+
+impl Default for DcBlocker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Per-frame measurements produced by [`frame_stats`] (plan-published API —
 /// field-for-field exactly this shape).
 ///
@@ -687,5 +733,45 @@ mod tests {
         let many: Vec<i16> = (0..512i32).map(|i| (i * 131 - 32768) as i16).collect();
         let s2 = frame_stats(&many);
         assert_eq!(s2.distinct, 256, "saturates at the table size");
+    }
+
+    #[test]
+    fn dc_blocker_removes_a_constant_offset() {
+        let mut blocker = DcBlocker::new();
+        let mut frame = [1000i16; 320];
+        // Several frames: the one-pole recurrence needs a few time constants.
+        for _ in 0..20 {
+            frame = [1000i16; 320];
+            blocker.process_frame(&mut frame);
+        }
+        let tail = &frame[frame.len() - 50..];
+        let mean = tail.iter().map(|s| i32::from(*s)).sum::<i32>() / tail.len() as i32;
+        assert!(mean.abs() < 10, "constant DC must decay to ~0, mean = {mean}");
+
+        let stats = frame_stats(&frame);
+        assert!(
+            stats.mean.abs() < 0.05 * stats.rms.max(1.0),
+            "|mean|/rms must fall below the 0.05 gate, got {}",
+            stats.mean.abs() / stats.rms.max(1.0)
+        );
+    }
+
+    #[test]
+    fn dc_blocker_passes_the_1khz_reference_tone() {
+        let tone: Vec<i16> = (0..3200)
+            .map(|n| {
+                let x = (2.0 * core::f32::consts::PI * 1000.0 * n as f32 / 16_000.0).sin();
+                (x * 8000.0) as i16
+            })
+            .collect();
+
+        let mut blocked: Vec<i16> = tone.clone();
+        let mut blocker = DcBlocker::new();
+        blocker.process_frame(&mut blocked);
+
+        let expected = 8000.0 / core::f32::consts::SQRT_2;
+        let measured = frame_stats(&blocked[1600..]).rms;
+        let error = (measured - expected).abs() / expected;
+        assert!(error < 0.05, "1 kHz RMS within 5%, got {measured} vs {expected} (err {error})");
     }
 }
