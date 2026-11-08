@@ -77,8 +77,14 @@ pub fn run() -> ! {
     let mount_point = storage
         .as_ref()
         .map_or("", |storage| storage.base_path());
+    let station_ip = net::station_ipv4();
+    let ipv4 = station_ip.map(|ip| ip.to_string());
+    match ipv4.as_deref() {
+        Some(ip) => logging::log!("boot: RTSP advertising {ip}:{RTSP_PORT}"),
+        None => logging::log!("boot: WARNING: station IP unavailable; RTSP advertises 0.0.0.0"),
+    }
     let media_config = media::Config {
-        ipv4: None,
+        ipv4: ipv4.as_deref(),
         mount_point,
         port: RTSP_PORT,
     };

@@ -361,6 +361,25 @@ pub fn may_send_rtcp() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// IP address conversion (host-compilable)
+// ---------------------------------------------------------------------------
+
+/// Convert the raw `esp_ip4_addr_t.addr` value into an [`std::net::Ipv4Addr`].
+///
+/// Byte-order reasoning: `esp_ip4_addr_t.addr` is a `u32` whose **memory**
+/// layout holds the four IPv4 octets in network order (`addr[0]` = most
+/// significant octet on the wire). On a little-endian Xtensa target, a value
+/// that reads `0x0100007F` in memory is therefore the octets `7F 00 00 01`,
+/// i.e. `127.0.0.1`. `Ipv4Addr::from([u8; 4])` consumes exactly those memory
+/// bytes, so `addr.to_ne_bytes()` is correct: it reads the bytes as the
+/// device stores them. `from_bits` / `from_be` would reinterpret the integer
+/// and swap octets on Xtensa, producing a wrong address. This helper is not
+/// `cfg`-gated so the host harness can test it.
+pub fn ipv4_from_esp_addr(addr: u32) -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::from(addr.to_ne_bytes())
+}
+
+// ---------------------------------------------------------------------------
 // Device glue
 // ---------------------------------------------------------------------------
 
@@ -381,7 +400,8 @@ mod esp_impl {
     use crate::session::{self, Event, SessionAction};
 
     use super::{
-        is_synced, retry_backoff_ms, with_sntp_clock, NetConfig, NetError, RESYNC_INTERVAL_SECS,
+        ipv4_from_esp_addr, is_synced, retry_backoff_ms, with_sntp_clock, NetConfig, NetError,
+        RESYNC_INTERVAL_SECS,
     };
 
     /// Private FFI boundary — the ONLY `unsafe` in this file (house rule:
@@ -464,6 +484,33 @@ mod esp_impl {
     /// so it needs no guard.
     pub fn ensure_netif_initialised() -> Result<(), EspError> {
         ffi::netif_init()
+    }
+
+    /// Read the station interface's current IPv4 address, or `None` when the
+    /// netif does not exist or has not been assigned an address yet.
+    pub fn station_ipv4() -> Option<std::net::Ipv4Addr> {
+        let mut info = esp_idf_svc::sys::esp_netif_ip_info_t::default();
+        // SAFETY: `ifkey` is a static NUL-terminated C string. The handle is
+        // only passed to `esp_netif_get_ip_info`, which writes into the
+        // properly aligned `info` and retains no pointer. Both calls are
+        // bounded reads of netif state; no Rust aliasing is violated because
+        // `info` is exclusively borrowed for the duration of the call.
+        unsafe {
+            let ifkey = b"WIFI_STA_DEF\0";
+            let handle = esp_idf_svc::sys::esp_netif_get_handle_from_ifkey(
+                ifkey.as_ptr() as *const _,
+            );
+            if handle.is_null() {
+                return None;
+            }
+            if esp_idf_svc::sys::esp_netif_get_ip_info(handle, &mut info) != 0 {
+                return None;
+            }
+        }
+        if info.ip.addr == 0 {
+            return None;
+        }
+        Some(ipv4_from_esp_addr(info.ip.addr))
     }
 
     static SNTP_HANDLE: Mutex<Option<EspSntp<'static>>> = Mutex::new(None);
@@ -830,7 +877,7 @@ mod esp_impl {
 
 #[cfg(target_os = "espidf")]
 #[allow(unused_imports)] // consumed by the Todo 20 boot wiring
-pub use esp_impl::{bring_up, ensure_netif_initialised, NetHandles};
+pub use esp_impl::{bring_up, ensure_netif_initialised, station_ipv4, NetHandles};
 
 #[cfg(test)]
 mod tests {
@@ -941,6 +988,18 @@ mod tests {
         clock.set_started(200);
         // A re-entrant supervisor must not push the timeout window forward.
         assert_eq!(clock.started_at_ms, Some(100));
+    }
+
+    #[test]
+    fn esp_ipv4_addr_bytes_map_to_the_wire_order_octets() {
+        assert_eq!(
+            ipv4_from_esp_addr(0x0100_007F),
+            std::net::Ipv4Addr::new(127, 0, 0, 1)
+        );
+        assert_eq!(
+            ipv4_from_esp_addr(0x0101_A8C0),
+            std::net::Ipv4Addr::new(192, 168, 1, 1)
+        );
     }
 
     #[test]
