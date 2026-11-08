@@ -568,7 +568,7 @@ mod ffi {
             vsync_pin: 38,
             href_pin: 47,
             pclk_pin: 13,
-            xclk_freq: 10_000_000,
+            xclk_freq: 20_000_000,
             i2c_port: 0,
         }
     }
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(cfg.href_pin, 47);
         assert_eq!(cfg.pclk_pin, 13);
         assert_eq!(cfg.data, [15, 17, 18, 16, 14, 12, 11, 48]);
-        assert_eq!(cfg.xclk_freq, 10_000_000);
+        assert_eq!(cfg.xclk_freq, 20_000_000);
         assert_eq!(cfg.i2c_port, 0);
         assert_eq!((cfg.pwr_pin, cfg.reset_pin), (-1, -1));
     }

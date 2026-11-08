@@ -437,7 +437,7 @@ fn resolve_control(base: &RtspUrl, control: &str) -> String {
 
 fn parse_tracks(sdp: &str, base: &RtspUrl) -> Result<Vec<Track>, ClientError> {
     let mut tracks = Vec::new();
-    let mut current: Option<(TrackKind, u8)> = None;
+    let mut current: Option<(TrackKind, u8, Option<u8>)> = None;
 
     for line in sdp.lines() {
         if let Some(rest) = line.strip_prefix("m=") {
@@ -450,15 +450,30 @@ fn parse_tracks(sdp: &str, base: &RtspUrl) -> Result<Vec<Track>, ClientError> {
                     continue;
                 }
             };
-            let payload_type = fields
-                .last()
+            let default_payload_type = fields
+                .get(3)
                 .and_then(|s| s.parse::<u8>().ok())
                 .ok_or_else(|| {
                     ClientError::Protocol(format!("cannot parse payload type from SDP line {line:?}"))
                 })?;
-            current = Some((kind, payload_type));
+            current = Some((kind, default_payload_type, None));
+        } else if let Some(rest) = line.strip_prefix("a=rtpmap:") {
+            if let Some((kind, _default_pt, preferred)) = current.as_mut() {
+                let mut parts = rest.split_whitespace();
+                let pt = parts.next().and_then(|s| s.parse::<u8>().ok());
+                let encoding = parts.next().and_then(|s| s.split('/').next());
+                if let (Some(pt), Some(encoding)) = (pt, encoding) {
+                    let matches_kind = match kind {
+                        TrackKind::Audio => encoding.eq_ignore_ascii_case("PCMU"),
+                        TrackKind::Video => encoding.eq_ignore_ascii_case("JPEG"),
+                    };
+                    if matches_kind {
+                        *preferred = Some(pt);
+                    }
+                }
+            }
         } else if let Some(control) = line.strip_prefix("a=control:") {
-            if let Some((kind, payload_type)) = current.take() {
+            if let Some((kind, default_pt, preferred)) = current.take() {
                 let control = control.trim();
                 if control.is_empty() || control == "*" {
                     continue;
@@ -466,7 +481,7 @@ fn parse_tracks(sdp: &str, base: &RtspUrl) -> Result<Vec<Track>, ClientError> {
                 tracks.push(Track {
                     kind,
                     control: resolve_control(base, control),
-                    payload_type,
+                    payload_type: preferred.unwrap_or(default_pt),
                 });
             }
         }
@@ -534,12 +549,13 @@ fn run_live(url: &str) -> Result<StreamStats, ClientError> {
     let mut session: Option<String> = None;
     let mut video_channel: Option<u8> = None;
     let mut audio_channel: Option<u8> = None;
-    for track in &tracks {
-        let resp = client.request(
-            "SETUP",
-            &track.control,
-            &[("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")],
-        )?;
+    for (index, track) in tracks.iter().enumerate() {
+        let transport = format!(
+            "RTP/AVP/TCP;unicast;interleaved={}-{}",
+            index * 2,
+            index * 2 + 1
+        );
+        let resp = client.request("SETUP", &track.control, &[("Transport", &transport)])?;
         expect_ok(&resp, &format!("SETUP {}", track.control))?;
 
         let id = resp.header("session").ok_or_else(|| {

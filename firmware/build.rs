@@ -45,6 +45,7 @@ fn main() {
         Some((key, value)) => {
             let args = shlex_split(&value);
             patch_esp32_camera_eoi_scan(&args);
+            patch_esp32_camera_soi_dump(&args);
             for arg in args {
                 // One directive per argument: each value is a single argv item.
                 println!("cargo::rustc-link-arg={arg}");
@@ -106,25 +107,7 @@ fn patch_esp32_camera_eoi_scan(link_args: &[String]) {
         return;
     }
 
-    let mut path = env::var_os("PATH").unwrap_or_default();
-    if let Some(linker_dir) = link_args
-        .iter()
-        .position(|arg| arg == "--ldproxy-linker")
-        .and_then(|index| link_args.get(index + 1))
-        .and_then(|linker| Path::new(linker).parent())
-    {
-        let mut prefixed = linker_dir.as_os_str().to_owned();
-        prefixed.push(":");
-        prefixed.push(env::var_os("PATH").unwrap_or_default());
-        path = prefixed;
-    }
-    let status = Command::new("ninja")
-        .arg("-C")
-        .arg(&build_dir)
-        .arg("esp-idf/espressif__esp32-camera/libespressif__esp32-camera.a")
-        .env("PATH", path)
-        .status();
-    match status {
+    match run_camera_ninja(link_args, &build_dir) {
         Ok(status) if status.success() => println!(
             "cargo:warning=firmware build.rs: patched esp32-camera EOI scan to search the full frame buffer"
         ),
@@ -137,6 +120,101 @@ fn patch_esp32_camera_eoi_scan(link_args: &[String]) {
              the EOI patch may not be linked"
         ),
     }
+}
+
+/// Log the length and first bytes of frames that fail the SOI check.
+///
+/// `CAM_WARN_THROTTLE` only accepts a literal format string, so the existing
+/// `NO-SOI` branch cannot report the frame contents. Replace that branch with
+/// a direct `ESP_CAMERA_ETS_PRINTF` call that dumps `len` and the first eight
+/// bytes, once on the first reject and then every 100 rejects. Idempotent via
+/// the `NO-SOI len=` marker.
+fn patch_esp32_camera_soi_dump(link_args: &[String]) {
+    let Some(cwd_index) = link_args.iter().position(|arg| arg == "--ldproxy-cwd") else {
+        return;
+    };
+    let Some(build_dir) = link_args.get(cwd_index + 1).map(PathBuf::from) else {
+        return;
+    };
+    let cam_hal = build_dir
+        .join("../managed_components/espressif__esp32-camera/driver/cam_hal.c");
+    let Ok(contents) = fs::read_to_string(&cam_hal) else {
+        println!(
+            "cargo:warning=firmware build.rs: could not read {}; skipping camera SOI dump patch",
+            cam_hal.display()
+        );
+        return;
+    };
+    if contents.contains("NO-SOI len=") {
+        return;
+    }
+    let original = "\
+    CAM_WARN_THROTTLE(warn_soi_miss_cnt,
+                      \"NO-SOI - JPEG start marker missing\");
+    return -1;";
+    if !contents.contains(original) {
+        println!(
+            "cargo:warning=firmware build.rs: camera NO-SOI branch not found in {}",
+            cam_hal.display()
+        );
+        return;
+    }
+    let patched = "\
+    if (++warn_soi_miss_cnt == 1 || (warn_soi_miss_cnt % 100) == 0) {
+        ESP_CAMERA_ETS_PRINTF(DRAM_STR(\"cam_hal: NO-SOI len=%u head=%02x%02x%02x%02x %02x%02x%02x%02x\\r\\n\"),
+                              (unsigned)length,
+                              inbuf[0], inbuf[1], inbuf[2], inbuf[3],
+                              inbuf[4], inbuf[5], inbuf[6], inbuf[7]);
+    }
+    return -1;";
+    let patched = contents.replace(original, patched);
+    if let Err(error) = fs::write(&cam_hal, patched) {
+        println!(
+            "cargo:warning=firmware build.rs: could not write {} ({error}); camera SOI dump patch skipped",
+            cam_hal.display()
+        );
+        return;
+    }
+
+    match run_camera_ninja(link_args, &build_dir) {
+        Ok(status) if status.success() => println!(
+            "cargo:warning=firmware build.rs: patched esp32-camera SOI dump"
+        ),
+        Ok(status) => println!(
+            "cargo:warning=firmware build.rs: esp32-camera rebuild failed ({status}); \
+             the SOI dump patch may not be linked"
+        ),
+        Err(error) => println!(
+            "cargo:warning=firmware build.rs: could not run ninja ({error}); \
+             the SOI dump patch may not be linked"
+        ),
+    }
+}
+
+/// Rebuild the esp32-camera component archive with the component's own ninja
+/// rule so the Rust link in the same build picks up the patched sources.
+fn run_camera_ninja(
+    link_args: &[String],
+    build_dir: &Path,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut path = env::var_os("PATH").unwrap_or_default();
+    if let Some(linker_dir) = link_args
+        .iter()
+        .position(|arg| arg == "--ldproxy-linker")
+        .and_then(|index| link_args.get(index + 1))
+        .and_then(|linker| Path::new(linker).parent())
+    {
+        let mut prefixed = linker_dir.as_os_str().to_owned();
+        prefixed.push(":");
+        prefixed.push(env::var_os("PATH").unwrap_or_default());
+        path = prefixed;
+    }
+    Command::new("ninja")
+        .arg("-C")
+        .arg(build_dir)
+        .arg("esp-idf/espressif__esp32-camera/libespressif__esp32-camera.a")
+        .env("PATH", path)
+        .status()
 }
 
 fn rewrite_camera_eoi_scan(contents: &str) -> Option<String> {
