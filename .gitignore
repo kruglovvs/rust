@@ -6,7 +6,6 @@ target/
 *.bak.*
 
 # Local secrets
-.env
 .env.*
 
 # Planning / agent scratch (never committed per plan commit strategy)
