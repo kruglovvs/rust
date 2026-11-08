@@ -1,6 +1,8 @@
 //! Device entry point: hand control to the pipeline orchestrator.
 
 mod app;
+#[cfg(feature = "rtsp-selftest")]
+mod selftest;
 
 const RUNTIME_STACK_BYTES: usize = 64 * 1024;
 

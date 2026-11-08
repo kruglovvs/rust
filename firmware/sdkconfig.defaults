@@ -127,3 +127,17 @@ CONFIG_ESP_MCP_ENABLE=n
 # allows an absolute CSV path, which is required here.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/workspaces/rust/partitions.csv"
+
+# RTSP/media timing and UDP pool parity with Espressif's own example.
+#
+# The RTSP example requires a 1 kHz tick; with the 100 Hz default the
+# esp_rtsp server task busy-spins and can starve IDLE0.
+# Track these values against the vendor example:
+# managed_components/espressif__esp_rtsp_service/examples/rtsp_service/sdkconfig.defaults
+CONFIG_FREERTOS_HZ=1000
+# RTP/UDP sockets per the vendor example (RTP + RTCP per track, per session).
+CONFIG_LWIP_MAX_UDP_PCBS=64
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
+# The esp_rtsp server task polls its listening socket; the vendor example
+# disables the task watchdog for the same reason.
+CONFIG_ESP_TASK_WDT_EN=n

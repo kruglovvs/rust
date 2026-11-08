@@ -1,24 +1,4 @@
 use std::ffi::CString;
-use std::sync::Mutex;
-
-static LOG_LOCK: Mutex<()> = Mutex::new(());
-
-mod ffi {
-    use core::ffi::c_char;
-    use std::ffi::CString;
-
-    /// `esp_rom_printf` is ROM-resident and bypasses VFS, which is why thread
-    /// logging uses it: `println!` from a non-main thread writes through the VFS
-    /// path and crashes on this target. It is not reentrant, so callers serialize.
-    pub(super) fn rom_printf(message: &CString) {
-        unsafe {
-            esp_idf_sys::esp_rom_printf(
-                b"%s\0".as_ptr() as *const c_char,
-                message.as_ptr(),
-            );
-        }
-    }
-}
 
 pub fn print(arguments: std::fmt::Arguments<'_>) {
     let text = format!("{arguments}");
@@ -30,8 +10,16 @@ pub fn print(arguments: std::fmt::Arguments<'_>) {
     let Ok(message) = CString::new(text) else {
         return;
     };
-    let _guard = LOG_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    ffi::rom_printf(&message);
+    // SAFETY: both C strings are NUL-terminated and live for the call;
+    // esp_log_write is internally synchronized.
+    unsafe {
+        esp_idf_sys::esp_log_write(
+            esp_idf_sys::esp_log_level_t_ESP_LOG_INFO,
+            b"app\0".as_ptr() as *const core::ffi::c_char,
+            b"%s\0".as_ptr() as *const core::ffi::c_char,
+            message.as_ptr(),
+        );
+    }
 }
 
 #[macro_export]

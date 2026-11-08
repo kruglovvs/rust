@@ -17,6 +17,8 @@ media = { path = "../components/media" }
 [features]
 # Format the SD card to FAT32 on first mount attempt (one-time, compile-time flag).
 sd-format-on-mount = ["storage/sd-format-on-mount"]
+# Boot-time on-device RTSP self-check against 127.0.0.1 (diagnostics only).
+rtsp-selftest = []
 
 [package.metadata.esp-idf-sys]
 # Relative to this package dir. Pinned octal-PSRAM + test-headroom sdkconfig.

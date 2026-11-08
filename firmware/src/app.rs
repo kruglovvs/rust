@@ -15,6 +15,9 @@ pub fn run() -> ! {
         logging::log!("boot: WARNING: netif initialization failed: {error}");
     }
 
+    #[cfg(feature = "rtsp-selftest")]
+    raise_rtsp_log_level();
+
     let peripherals = match Peripherals::take() {
         Ok(peripherals) => peripherals,
         Err(error) => fatal("peripheral initialization failed", error),
@@ -77,7 +80,23 @@ pub fn run() -> ! {
     let mount_point = storage
         .as_ref()
         .map_or("", |storage| storage.base_path());
-    let station_ip = net::station_ipv4();
+    const IP_WAIT: Duration = Duration::from_secs(60);
+    let wait_started = std::time::Instant::now();
+    let mut station_ip = net::station_ipv4();
+    let mut last_note = 0u64;
+    while station_ip.is_none() && wait_started.elapsed() < IP_WAIT {
+        thread::sleep(Duration::from_millis(500));
+        let elapsed = wait_started.elapsed().as_secs();
+        if elapsed >= last_note + 5 {
+            last_note = elapsed;
+            logging::log!("boot: waiting for station IP ({elapsed}s elapsed)");
+        }
+        station_ip = net::station_ipv4();
+    }
+    match station_ip {
+        Some(_) => logging::log!("boot: station IP ready after {}s", wait_started.elapsed().as_secs()),
+        None => logging::log!("boot: WARNING: no station IP after 60s; starting pipeline anyway"),
+    }
     let ipv4 = station_ip.map(|ip| ip.to_string());
     match ipv4.as_deref() {
         Some(ip) => logging::log!("boot: RTSP advertising {ip}:{RTSP_PORT}"),
@@ -95,13 +114,42 @@ pub fn run() -> ! {
             None
         }
     };
+    logging::log!("boot: A after pipeline");
 
     let recording = pipeline.as_ref().is_some_and(|pipeline| pipeline.recording());
+    logging::log!("boot: B recording={recording}");
+
     let audio = pipeline.as_ref().is_some_and(|pipeline| pipeline.audio());
+    logging::log!("boot: C audio={audio}");
+
     let rtsp = pipeline.as_ref().is_some_and(|pipeline| pipeline.rtsp());
+    logging::log!("boot: D rtsp={rtsp}");
 
     logging::log!("boot: ready recording={recording} audio={audio} rtsp={rtsp}");
 
+    #[cfg(feature = "rtsp-selftest")]
+    {
+        log_heap_after_pipeline();
+        if pipeline.is_some() {
+            logging::log!("boot: selftest begin");
+            crate::selftest::probe(RTSP_PORT, station_ip);
+            logging::log!("boot: selftest end");
+        }
+    }
+
+    #[cfg(feature = "rtsp-selftest")]
+    {
+        let mut tick: u32 = 0;
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            tick = tick.wrapping_add(1);
+            if tick % 10 == 0 {
+                let (free, largest, spiram) = heap_sample();
+                logging::log!("boot: heartbeat internal_free={free} largest={largest} spiram_free={spiram}");
+            }
+        }
+    }
+    #[cfg(not(feature = "rtsp-selftest"))]
     loop {
         thread::sleep(Duration::from_secs(1));
     }
@@ -125,5 +173,50 @@ fn fatal<E: std::fmt::Display>(message: &str, error: E) -> ! {
     logging::log!("boot: FATAL: {message}: {error}");
     loop {
         thread::sleep(Duration::from_secs(60));
+    }
+}
+
+#[cfg(feature = "rtsp-selftest")]
+fn raise_rtsp_log_level() {
+    const TAGS: [&[u8]; 7] = [
+        b"ESP_RTSP_SERVER\0",
+        b"ESP_RTSP\0",
+        b"ESP_RTSP_SERVICE\0",
+        b"RTSP\0",
+        b"RTC_TRANSPORT\0",
+        b"ESP_SERVICE\0",
+        b"MEDIA_LIB\0",
+    ];
+    for tag in TAGS {
+        // SAFETY: each tag is a NUL-terminated static C string.
+        unsafe {
+            esp_idf_svc::sys::esp_log_level_set(
+                tag.as_ptr() as *const core::ffi::c_char,
+                esp_idf_svc::sys::esp_log_level_t_ESP_LOG_DEBUG,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "rtsp-selftest")]
+fn log_heap_after_pipeline() {
+    let (internal_free, internal_largest, spiram_free) = heap_sample();
+    logging::log!(
+        "boot: heap after pipeline internal_free={internal_free} internal_largest={internal_largest} spiram_free={spiram_free}"
+    );
+}
+
+#[cfg(feature = "rtsp-selftest")]
+fn heap_sample() -> (usize, usize, usize) {
+    const MALLOC_CAP_INTERNAL: u32 = 1 << 11;
+    const MALLOC_CAP_SPIRAM: u32 = 1 << 10;
+    use esp_idf_svc::sys::{heap_caps_get_free_size, heap_caps_get_largest_free_block};
+    // SAFETY: both calls only read allocator statistics and retain no pointers.
+    unsafe {
+        (
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+            heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        )
     }
 }

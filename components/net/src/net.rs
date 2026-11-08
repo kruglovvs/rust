@@ -18,15 +18,14 @@
 //! > logged once with the reason, and Todo 13 suppresses Sender Reports rather
 //! > than fabricating a wallclock.
 //!
-//! **`EspSntp` handle held for process lifetime — micro-rdk lesson.** LWIP's
-//! SNTP client is stopped by `EspSntp::drop` (`sntp_stop()`), so a handle that
-//! goes out of scope produces a device that synced once and then silently
-//! stops — which fails much later and much more confusingly than a device that
-//! never synced. This module therefore stores the handle in a module-level
-//! `static SNTP_HANDLE` that no caller can drop; `bring_up` only ever replaces
-//! it (fallback-server swap, which goes through `Drop` → re-init deliberately).
-//! Todo 13 must read time via [`is_synced`] / [`last_sync_utc`], never via a
-//! handle it owns.
+//! **SNTP disabled.** The lwIP SNTP client is no longer started: on IDF
+//! 5.5.x it hard-crashes in `sys_untimeout` (called from `sntp_recv`) every
+//! time a sync completes (`EXCVADDR 0x11`, LoadProhibited). The GMF RTSP stack
+//! timestamps RTP from a monotonic clock and does not need wallclock time, so
+//! the client is removed rather than worked around. The pure [`SntpClock`]
+//! API ([`is_synced`] / [`last_sync_utc`] / [`may_send_rtcp`]) is retained for
+//! API stability and existing host tests; because nothing syncs it,
+//! `is_synced()` simply stays `false` and RTCP Sender Reports stay suppressed.
 //!
 //! Behaviours (b)/(c)/(d) live in [`crate::session`] (pure policy); this file
 //! is the device glue that samples the heap, feeds events, applies returned
@@ -265,13 +264,6 @@ impl SntpClock {
         }
     }
 
-    /// Force the one-shot failure flag without waiting for the timeout —
-    /// used when `EspSntp::new` itself fails at bring-up, so the 90 s tick
-    /// cannot emit a second "not synced" line (plan: logged **once**).
-    pub fn mark_failure_logged(&mut self) {
-        self.failure_logged = true;
-    }
-
     pub fn record_sync(&mut self, at: SystemTime) {
         self.last_sync = Some(at);
     }
@@ -385,24 +377,19 @@ pub fn ipv4_from_esp_addr(addr: u32) -> std::net::Ipv4Addr {
 
 #[cfg(target_os = "espidf")]
 mod esp_impl {
-    use std::sync::Mutex;
     use std::thread;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     use esp_idf_svc::eventloop::EspSystemEventLoop;
     use esp_idf_svc::hal::modem::Modem;
     use esp_idf_svc::mdns::EspMdns;
     use esp_idf_svc::nvs::EspDefaultNvsPartition;
-    use esp_idf_svc::sntp::{EspSntp, OperatingMode, SntpConf, SyncMode, SyncStatus};
     use esp_idf_svc::sys::EspError;
     use esp_idf_svc::wifi::{BlockingWifi, Configuration, EspWifi};
 
     use crate::session::{self, Event, SessionAction};
 
-    use super::{
-        ipv4_from_esp_addr, is_synced, retry_backoff_ms, with_sntp_clock, NetConfig, NetError,
-        RESYNC_INTERVAL_SECS,
-    };
+    use super::{ipv4_from_esp_addr, retry_backoff_ms, NetConfig, NetError};
 
     /// Private FFI boundary — the ONLY `unsafe` in this file (house rule:
     /// every executable `unsafe` lives inside `mod ffi`, same discipline as
@@ -513,38 +500,7 @@ mod esp_impl {
         Some(ipv4_from_esp_addr(info.ip.addr))
     }
 
-    static SNTP_HANDLE: Mutex<Option<EspSntp<'static>>> = Mutex::new(None);
-
-    fn sntp_lock<F, R>(f: F) -> R
-    where
-        F: FnOnce(&mut Option<EspSntp<'static>>) -> R,
-    {
-        let mut guard = SNTP_HANDLE
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f(&mut guard)
-    }
-
-    fn sync_callback(d: Duration) {
-        if let Some(at) = SystemTime::UNIX_EPOCH.checked_add(d) {
-            with_sntp_clock(|c| c.record_sync(at));
-            ffi::log_info("net", &format!("sntp: synced at {at:?} (is_synced=true)"));
-        }
-    }
-
-    fn start_sntp(server: &str) -> Result<EspSntp<'static>, EspError> {
-        let mut conf = SntpConf::default();
-        // `SNTP_MAX_SERVERS` is 1 in this sdkconfig; fill every slot so the
-        // code stays correct if the limit is ever raised.
-        for slot in conf.servers.iter_mut() {
-            *slot = server;
-        }
-        conf.operating_mode = OperatingMode::Poll;
-        conf.sync_mode = SyncMode::Immediate;
-        EspSntp::new_with_callback(&conf, sync_callback)
-    }
-
-    /// Bring up STA + mDNS + SNTP and start the
+    /// Bring up STA + mDNS and start the
     /// supervisor thread. The initial connect is attempted here but **its
     /// failure is not fatal**: the supervisor keeps retrying with backoff
     /// (plan acceptance: "disconnecting Wi-Fi tears the session down cleanly
@@ -648,40 +604,21 @@ mod esp_impl {
             ),
         );
 
-        // SNTP — once the interface is up (plan). Handle goes into a static;
-        // it can never be dropped by a caller.
-        with_sntp_clock(|c| c.set_started(ffi::now_ms()));
-        match start_sntp(&config.sntp_primary) {
-            Ok(handle) => {
-                sntp_lock(|slot| *slot = Some(handle));
-                ffi::log_info(
-                    "net",
-                    &format!(
-                        "sntp: initialized server={} fallback={} resync={}s timezone=UTC0 (TZ=UTC0)",
-                        config.sntp_primary, config.sntp_fallback, RESYNC_INTERVAL_SECS
-                    ),
-                );
-            }
-            Err(e) => {
-                // Failure path: is_synced() stays false, one log line, no panic.
-                with_sntp_clock(|c| c.mark_failure_logged());
-                ffi::log_info(
-                    "net",
-                    &format!(
-                        "sntp: init failed ({e}); reason: SNTP service unavailable — is_synced=false, RTCP SRs suppressed"
-                    ),
-                );
-            }
-        }
+        // SNTP is deliberately not started: the upstream lwIP SNTP client
+        // hard-crashes on IDF 5.5.x when a sync completes, and the GMF RTSP
+        // stack timestamps RTP from a monotonic clock instead of wallclock.
+        ffi::log_info(
+            "net",
+            "sntp: disabled (upstream lwIP SNTP crash on IDF 5.5.x; GMF RTSP uses monotonic RTP timestamps)",
+        );
 
         // Session cooldown (plan (c): server-provided).
         session::with_session(|s| s.set_cooldown_ms(config.cooldown_ms));
 
-        let supervisor_cfg = config.clone();
         let supervisor = thread::Builder::new()
             .name("net-supervisor".into())
             .stack_size(16 * 1024)
-            .spawn(move || supervisor_loop(wifi, supervisor_cfg, was_connected))
+            .spawn(move || supervisor_loop(wifi, was_connected))
             .map_err(|_| NetError::ThreadSpawn)?;
 
         Ok(NetHandles {
@@ -724,7 +661,6 @@ mod esp_impl {
 
     fn supervisor_loop(
         mut wifi: BlockingWifi<EspWifi<'static>>,
-        config: NetConfig,
         mut was_connected: bool,
     ) {
         let mut attempt: u32 = 0;
@@ -791,52 +727,6 @@ mod esp_impl {
             if last_decision != Some(decision) {
                 log_decision(decision);
                 last_decision = Some(decision);
-            }
-
-            // SNTP supervision: one failure line + one fallback swap, both
-            // once (plan: "the failure is logged once with the reason").
-            if let Some(reason) = with_sntp_clock(|c| c.take_failure_report(now)) {
-                ffi::log_info(
-                    "net",
-                    &format!(
-                        "WARN sntp: not synced ({reason}); is_synced=false, RTCP Sender Reports stay suppressed"
-                    ),
-                );
-            }
-            if with_sntp_clock(|c| c.arm_fallback_once(now)) {
-                let server = config.sntp_fallback.clone();
-                ffi::log_info(
-                    "net",
-                    &format!("sntp: switching to fallback server {server} (primary did not sync)"),
-                );
-                // Order matters: the old handle must be DROPPED first —
-                // `EspSntp::drop` runs `sntp_stop()` and clears the TAKEN
-                // guard, without which the re-init returns INVALID_STATE.
-                sntp_lock(|slot| {
-                    *slot = None;
-                    match start_sntp(&server) {
-                        Ok(handle) => *slot = Some(handle),
-                        Err(e) => ffi::log_info(
-                            "net",
-                            &format!("sntp: fallback init failed ({e}); is_synced stays false"),
-                        ),
-                    }
-                });
-            }
-
-            // Belt-and-braces: if LWIP reports a completed sync but the
-            // callback somehow never fired, adopt the now-correct system
-            // clock once (it is only correct *because* SNTP completed).
-            if !is_synced() {
-                let completed = sntp_lock(|slot| {
-                    slot.as_ref()
-                        .map(|h| h.get_sync_status() == SyncStatus::Completed)
-                        .unwrap_or(false)
-                });
-                if completed {
-                    with_sntp_clock(|c| c.record_sync(SystemTime::now()));
-                    ffi::log_info("net", "sntp: synced (status Completed, callback missed)");
-                }
             }
         }
     }

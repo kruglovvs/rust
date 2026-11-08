@@ -1,4 +1,5 @@
 #pragma once
+#include "media_lib_adapter.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "esp_codec_dev_types.h"
@@ -12,6 +13,7 @@
 #include "esp_rtsp_service_ops.h"
 #include "esp_media_service.h"
 #include "esp_service.h"
+#include "esp_service_scheduler.h"
 #include "esp_muxer_service.h"
 #include "esp_muxer_service_ops.h"
 #include "esp_muxer_default.h"

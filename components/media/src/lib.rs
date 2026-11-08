@@ -73,6 +73,8 @@ pub enum Step {
     CodecDevice,
     AudioSource,
     VideoSource,
+    MediaLibAdapter,
+    Scheduler,
     RegisterAudioEncoder,
     RegisterVideoEncoder,
     RegisterMuxer,
@@ -104,6 +106,8 @@ impl Step {
             Step::CodecDevice => "codec_device",
             Step::AudioSource => "audio_source",
             Step::VideoSource => "video_source",
+            Step::MediaLibAdapter => "media_lib_adapter",
+            Step::Scheduler => "scheduler",
             Step::RegisterAudioEncoder => "register_audio_encoder",
             Step::RegisterVideoEncoder => "register_video_encoder",
             Step::RegisterMuxer => "register_muxer",
@@ -161,6 +165,26 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Map a service thread name to an override `(stack_size, priority, core_id)`.
+///
+/// Mirrors Espressif's `esp_rtsp_service` example scheduler: RTSP threads get
+/// 8 KiB stacks on core 1, capture/GMF threads get 8 KiB stacks on core 0.
+/// `None` keeps the vendor defaults (the callback reports `ESP_ERR_NOT_FOUND`).
+fn thread_override(name: &str) -> Option<(u32, u8, i8)> {
+    match name {
+        "rtsp_server" | "rtsp_push" | "rtsp_src" => Some((8192, 1, 1)),
+        _ if name.contains("capture")
+            || name.contains("venc")
+            || name.contains("aenc")
+            || name.contains("VID_SRC")
+            || name.contains("AUD_SRC") =>
+        {
+            Some((8192, 8, 0))
+        }
+        _ => None,
+    }
+}
+
 /// Owns every handle of the running media pipeline.
 pub struct Pipeline {
     rtsp: *mut gmf::esp_rtsp_service_t,
@@ -170,7 +194,10 @@ pub struct Pipeline {
     i2s_rx: sys::i2s_chan_handle_t,
     i2c_bus: sys::i2c_master_bus_handle_t,
     linked: bool,
+    /// The RTSP start thread returned `Ok` (known only if it ever reports back).
     rtsp_started: bool,
+    /// The RTSP start thread has been spawned and may still be inside start.
+    rtsp_start_pending: bool,
     capture_started: bool,
     recording: bool,
     registered: bool,
@@ -188,6 +215,7 @@ impl Pipeline {
             i2c_bus: std::ptr::null_mut(),
             linked: false,
             rtsp_started: false,
+            rtsp_start_pending: false,
             capture_started: false,
             recording: !cfg.mount_point.is_empty(),
             registered: false,
@@ -219,38 +247,58 @@ impl Pipeline {
 
     /// Whether the RTSP server is running.
     pub fn rtsp(&self) -> bool {
-        self.rtsp_started
+        self.rtsp_started || self.rtsp_start_pending
     }
 
     fn start_inner(&mut self, cfg: &Config<'_>) -> Result<(), Error> {
+        // 00. Install the default media_lib adapter before anything else: the
+        //     RTSP core calls media_lib_socket_*, which are no-ops returning
+        //     ESP_ERR_NOT_SUPPORTED until the ESP-IDF socket implementation is
+        //     registered here.
+        logging::log!("pipeline: 00 media_lib adapter");
+        ffi::install_media_lib_adapter()?;
+
+        // 0. Install the service scheduler first: it must be in place before
+        //    any service is created, or the RTSP threads start with the 4 KiB
+        //    default stack and starve the application thread.
+        logging::log!("pipeline: 0 scheduler");
+        ffi::install_scheduler()?;
+
         // 1. Camera SCCB bus: esp32-camera's sccb-ng uses the *new* I2C master
         //    driver, so the bus must exist before esp_capture_start.
+        logging::log!("pipeline: 1 i2c bus");
         self.i2c_bus = ffi::i2c_master_bus()?;
 
         // 2. PDM microphone I2S RX channel, initialized but deliberately NOT
         //    enabled: esp_codec_dev_open() enables it exactly once via the
         //    I2S data interface's set_fmt/enable path.
+        logging::log!("pipeline: 2 pdm i2s");
         self.i2s_rx = ffi::pdm_rx_channel()?;
 
         // 3. esp_codec_dev record device backed by the I2S data interface.
+        logging::log!("pipeline: 3 codec device");
         let (dev_handle, data_if) = ffi::codec_device(self.i2s_rx)?;
         self.dev_handle = dev_handle;
         self.data_if = data_if;
 
         // 4. Audio source (PCM; G711U is encoded downstream by the capture
         //    service's GMF audio path).
+        logging::log!("pipeline: 4 audio source");
         let audio_src = ffi::audio_source(self.dev_handle)?;
 
         // 5. DVP video source (OV3660, MJPEG).
+        logging::log!("pipeline: 5 video source");
         let video_src = ffi::video_source()?;
 
         // 6. Register the default muxer and encoders. esp_capture resolves
         //    them through a registry (esp_muxer_open, encoder lookups), so
         //    they must be present before the capture service is created.
+        logging::log!("pipeline: 6 register defaults");
         ffi::register_defaults()?;
         self.registered = true;
 
         // 7. Capture service.
+        logging::log!("pipeline: 7 capture service");
         let service_cfg = gmf::esp_capture_service_cfg_t {
             name: CAPTURE_SERVICE_NAME.as_ptr() as *const core::ffi::c_char,
             max_stream_num: 1,
@@ -258,9 +306,11 @@ impl Pipeline {
         self.capture = ffi::capture_service(&service_cfg)?;
 
         // 8. Setup bundle: sources, tracks, muxer; apply and destroy.
+        logging::log!("pipeline: 8 capture setup apply");
         ffi::configure_capture(self.capture, &service_cfg, audio_src, video_src, cfg)?;
 
         // 9. RTSP service.
+        logging::log!("pipeline: 9 rtsp service");
         let rtsp_cfg = gmf::esp_rtsp_service_cfg_t {
             name: RTSP_SERVICE_NAME.as_ptr() as *const core::ffi::c_char,
             role: gmf::esp_rtsp_service_role_t_ESP_RTSP_SERVICE_ROLE_SERVER,
@@ -268,15 +318,36 @@ impl Pipeline {
         self.rtsp = ffi::rtsp_service(&rtsp_cfg, cfg)?;
 
         // 10. Join capture -> RTSP over the default stream, no frame plumbing.
+        logging::log!("pipeline: 10 media link");
         ffi::link(self.capture, self.rtsp)?;
         self.linked = true;
 
-        // 11. Contractual start order: RTSP first, then capture.
-        ffi::start_rtsp(self.rtsp)?;
-        self.rtsp_started = true;
+        // 11. Start capture before RTSP: the capture provider's tracks are only
+        // queryable while running, and the RTSP `on_start` hook asks the linked
+        // capture provider for its track list.
+        logging::log!("pipeline: 11 start capture");
         ffi::start_capture(self.capture)?;
         self.capture_started = true;
 
+        logging::log!("pipeline: 12 start rtsp (async)");
+        let rtsp_ptr = self.rtsp as usize;
+        std::thread::Builder::new()
+            .name("rtsp-start".into())
+            .stack_size(16 * 1024)
+            .spawn(move || {
+                let result = ffi::start_rtsp(rtsp_ptr as *mut gmf::esp_rtsp_service_t);
+                match result {
+                    Ok(()) => logging::log!("pipeline: rtsp start returned ok"),
+                    Err(error) => logging::log!("pipeline: rtsp start returned err={error}"),
+                }
+            })
+            .map_err(|_| Error::Esp {
+                step: Step::RtspStart,
+                code: -1,
+            })?;
+        self.rtsp_start_pending = true;
+
+        logging::log!("pipeline: started");
         Ok(())
     }
 }
@@ -291,6 +362,7 @@ impl Drop for Pipeline {
 mod ffi {
     use super::*;
     use core::ffi::c_char;
+    use core::ffi::CStr;
     use core::ptr::{null, null_mut};
 
     /// Convert an `esp_err_t` into a step-named result.
@@ -300,6 +372,54 @@ mod ffi {
         } else {
             Err(Error::Esp { step, code })
         }
+    }
+
+    /// Vendor-equivalent service thread sizing (see the esp_rtsp_service example).
+    unsafe extern "C" fn scheduler_cb(
+        request: *const gmf::esp_service_thread_request_t,
+        cfg: *mut gmf::esp_service_thread_cfg_t,
+        _ctx: *mut core::ffi::c_void,
+    ) -> i32 {
+        if request.is_null() || cfg.is_null() {
+            return sys::ESP_ERR_INVALID_ARG;
+        }
+        let name = (*request).thread_name;
+        if name.is_null() {
+            return sys::ESP_ERR_NOT_FOUND;
+        }
+        let name = match CStr::from_ptr(name).to_str() {
+            Ok(name) => name,
+            Err(_) => return sys::ESP_ERR_NOT_FOUND,
+        };
+        match thread_override(name) {
+            Some((stack_size, priority, core_id)) => {
+                (*cfg).stack_size = stack_size;
+                (*cfg).priority = priority;
+                (*cfg).core_id = core_id;
+                (*cfg).is_ext = false;
+                logging::log!(
+                    "scheduler: thread={} stack={} prio={} core={}",
+                    name,
+                    stack_size,
+                    priority,
+                    core_id
+                );
+                sys::ESP_OK
+            }
+            None => sys::ESP_ERR_NOT_FOUND,
+        }
+    }
+
+    /// Install the default media_lib adapter (socket implementation).
+    pub fn install_media_lib_adapter() -> Result<(), Error> {
+        let code = unsafe { gmf::media_lib_add_default_adapter() };
+        check(code, Step::MediaLibAdapter)
+    }
+
+    /// Install the service scheduler callback before any service is created.
+    pub fn install_scheduler() -> Result<(), Error> {
+        let code = unsafe { gmf::esp_service_scheduler_set_cb(Some(scheduler_cb), null_mut()) };
+        check(code, Step::Scheduler)
     }
 
     /// I2C master bus on port 0 (SCCB SDA 40, SCL 39) using the new driver.
@@ -448,7 +568,7 @@ mod ffi {
             vsync_pin: 38,
             href_pin: 47,
             pclk_pin: 13,
-            xclk_freq: 20_000_000,
+            xclk_freq: 10_000_000,
             i2c_port: 0,
         }
     }
@@ -692,14 +812,19 @@ mod ffi {
 
     /// Stop then release every handle, in reverse creation order.
     pub fn stop(pipeline: &mut Pipeline) {
+        logging::log!("pipeline: stop");
         unsafe {
+            // Reverse start order: RTSP stops before capture so the consumer
+            // is not still querying a stopped provider. If the start thread may
+            // still be inside `esp_service_start`, stopping could deadlock, so
+            // skip it and let deinit/free be best-effort.
+            if pipeline.rtsp_started && !pipeline.rtsp_start_pending {
+                let _ = gmf::esp_service_stop(pipeline.rtsp as *mut gmf::esp_service_t);
+                pipeline.rtsp_started = false;
+            }
             if pipeline.capture_started {
                 let _ = gmf::esp_service_stop(pipeline.capture as *mut gmf::esp_service_t);
                 pipeline.capture_started = false;
-            }
-            if pipeline.rtsp_started {
-                let _ = gmf::esp_service_stop(pipeline.rtsp as *mut gmf::esp_service_t);
-                pipeline.rtsp_started = false;
             }
             if pipeline.linked {
                 let _ = unlink(pipeline.capture, pipeline.rtsp);
@@ -747,6 +872,8 @@ mod tests {
 
     #[test]
     fn registration_steps_render_snake_case_names() {
+        assert_eq!(Step::MediaLibAdapter.as_str(), "media_lib_adapter");
+        assert_eq!(Step::Scheduler.as_str(), "scheduler");
         assert_eq!(
             Step::RegisterAudioEncoder.as_str(),
             "register_audio_encoder"
@@ -792,6 +919,17 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_overrides_rtsp_threads_and_keeps_unknown_defaults() {
+        assert_eq!(thread_override("rtsp_server"), Some((8192, 1, 1)));
+        assert_eq!(thread_override("rtsp_push"), Some((8192, 1, 1)));
+        assert_eq!(thread_override("rtsp_src"), Some((8192, 1, 1)));
+        assert_eq!(thread_override("video_capture"), Some((8192, 8, 0)));
+        assert_eq!(thread_override("VID_SRC"), Some((8192, 8, 0)));
+        // Unknown threads get `None`, which the callback maps to ESP_ERR_NOT_FOUND.
+        assert_eq!(thread_override("mystery_thread"), None);
+    }
+
+    #[test]
     fn dvp_source_honours_the_hardware_constraints() {
         let cfg = ffi::dvp_config();
         assert_eq!(cfg.buf_count, 2, "implementation indexes a fixed pic[2] array");
@@ -800,7 +938,7 @@ mod tests {
         assert_eq!(cfg.href_pin, 47);
         assert_eq!(cfg.pclk_pin, 13);
         assert_eq!(cfg.data, [15, 17, 18, 16, 14, 12, 11, 48]);
-        assert_eq!(cfg.xclk_freq, 20_000_000);
+        assert_eq!(cfg.xclk_freq, 10_000_000);
         assert_eq!(cfg.i2c_port, 0);
         assert_eq!((cfg.pwr_pin, cfg.reset_pin), (-1, -1));
     }
