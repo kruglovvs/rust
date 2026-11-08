@@ -15,3 +15,5 @@
 #include "esp_muxer_service.h"
 #include "esp_muxer_service_ops.h"
 #include "esp_muxer_default.h"
+#include "esp_audio_enc_default.h"
+#include "esp_video_enc_default.h"

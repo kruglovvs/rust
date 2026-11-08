@@ -73,6 +73,9 @@ pub enum Step {
     CodecDevice,
     AudioSource,
     VideoSource,
+    RegisterAudioEncoder,
+    RegisterVideoEncoder,
+    RegisterMuxer,
     CaptureService,
     CaptureSetup,
     CaptureSourceConfig,
@@ -101,6 +104,9 @@ impl Step {
             Step::CodecDevice => "codec_device",
             Step::AudioSource => "audio_source",
             Step::VideoSource => "video_source",
+            Step::RegisterAudioEncoder => "register_audio_encoder",
+            Step::RegisterVideoEncoder => "register_video_encoder",
+            Step::RegisterMuxer => "register_muxer",
             Step::CaptureService => "capture_service",
             Step::CaptureSetup => "capture_setup",
             Step::CaptureSourceConfig => "capture_source_config",
@@ -167,6 +173,7 @@ pub struct Pipeline {
     rtsp_started: bool,
     capture_started: bool,
     recording: bool,
+    registered: bool,
 }
 
 impl Pipeline {
@@ -183,6 +190,7 @@ impl Pipeline {
             rtsp_started: false,
             capture_started: false,
             recording: !cfg.mount_point.is_empty(),
+            registered: false,
         };
 
         match pipeline.start_inner(cfg) {
@@ -236,28 +244,34 @@ impl Pipeline {
         // 5. DVP video source (OV3660, MJPEG).
         let video_src = ffi::video_source()?;
 
-        // 6. Capture service.
+        // 6. Register the default muxer and encoders. esp_capture resolves
+        //    them through a registry (esp_muxer_open, encoder lookups), so
+        //    they must be present before the capture service is created.
+        ffi::register_defaults()?;
+        self.registered = true;
+
+        // 7. Capture service.
         let service_cfg = gmf::esp_capture_service_cfg_t {
             name: CAPTURE_SERVICE_NAME.as_ptr() as *const core::ffi::c_char,
             max_stream_num: 1,
         };
         self.capture = ffi::capture_service(&service_cfg)?;
 
-        // 7. Setup bundle: sources, tracks, muxer; apply and destroy.
+        // 8. Setup bundle: sources, tracks, muxer; apply and destroy.
         ffi::configure_capture(self.capture, &service_cfg, audio_src, video_src, cfg)?;
 
-        // 8. RTSP service.
+        // 9. RTSP service.
         let rtsp_cfg = gmf::esp_rtsp_service_cfg_t {
             name: RTSP_SERVICE_NAME.as_ptr() as *const core::ffi::c_char,
             role: gmf::esp_rtsp_service_role_t_ESP_RTSP_SERVICE_ROLE_SERVER,
         };
         self.rtsp = ffi::rtsp_service(&rtsp_cfg, cfg)?;
 
-        // 9. Join capture -> RTSP over the default stream, no frame plumbing.
+        // 10. Join capture -> RTSP over the default stream, no frame plumbing.
         ffi::link(self.capture, self.rtsp)?;
         self.linked = true;
 
-        // 10. Contractual start order: RTSP first, then capture.
+        // 11. Contractual start order: RTSP first, then capture.
         ffi::start_rtsp(self.rtsp)?;
         self.rtsp_started = true;
         ffi::start_capture(self.capture)?;
@@ -448,6 +462,17 @@ mod ffi {
             });
         }
         Ok(source)
+    }
+
+    /// Register the default muxer and encoders. Order matters: encoders first,
+    /// then the muxer. All three report success as 0.
+    pub fn register_defaults() -> Result<(), Error> {
+        let code = unsafe { gmf::esp_audio_enc_register_default() };
+        check(code, Step::RegisterAudioEncoder)?;
+        let code = unsafe { gmf::esp_video_enc_register_default() };
+        check(code, Step::RegisterVideoEncoder)?;
+        let code = unsafe { gmf::esp_muxer_register_default() };
+        check(code, Step::RegisterMuxer)
     }
 
     pub fn capture_service(
@@ -689,6 +714,12 @@ mod ffi {
                 let _ = gmf::esp_capture_service_destroy(pipeline.capture);
                 pipeline.capture = null_mut();
             }
+            if pipeline.registered {
+                gmf::esp_muxer_unregister_default();
+                gmf::esp_video_enc_unregister_default();
+                gmf::esp_audio_enc_unregister_default();
+                pipeline.registered = false;
+            }
             if !pipeline.dev_handle.is_null() {
                 gmf::esp_codec_dev_delete(pipeline.dev_handle);
                 pipeline.dev_handle = null_mut();
@@ -713,6 +744,19 @@ mod ffi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_steps_render_snake_case_names() {
+        assert_eq!(
+            Step::RegisterAudioEncoder.as_str(),
+            "register_audio_encoder"
+        );
+        assert_eq!(
+            Step::RegisterVideoEncoder.as_str(),
+            "register_video_encoder"
+        );
+        assert_eq!(Step::RegisterMuxer.as_str(), "register_muxer");
+    }
 
     #[test]
     fn check_maps_esp_ok_and_failure() {
