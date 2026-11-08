@@ -1,0 +1,11 @@
+[package]
+name = "net"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[dependencies]
+esp-idf-sys = "=0.38.1"
+esp-idf-hal = "=0.47.0"
+esp-idf-svc = "=0.53.0"
+logging = { path = "../logging" }

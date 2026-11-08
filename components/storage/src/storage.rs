@@ -2019,7 +2019,7 @@ mod tests {
         storage.write_file("reformat-probe.txt", probe).expect("write after reformat");
         let read_back = storage.read_file("reformat-probe.txt").expect("read after reformat");
         assert_eq!(read_back.as_slice(), probe, "reformatted volume must round-trip");
-        crate::log!(
+        logging::log!(
             "hil-sd-format: formatted + writable at {} ({} kHz, {} B free)",
             storage.base_path(),
             storage.negotiated_khz(),

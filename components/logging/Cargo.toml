@@ -1,0 +1,10 @@
+[package]
+name = "logging"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[dependencies]
+# ROM printf bridge: `esp_rom_printf` bypasses the VFS and is safe to call
+# from the non-main runtime thread on this target.
+esp-idf-sys = "=0.38.1"

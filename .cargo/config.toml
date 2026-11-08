@@ -4,14 +4,7 @@ target = "xtensa-esp32s3-espidf"
 [target.'cfg(target_os = "espidf")']
 linker = "ldproxy"
 runner = "espflash flash --monitor"
-# The pipeline entry points are not called yet (this is a build gate), so force
-# the component archive members into the final link. Without -u the linker's
-# --gc-sections drops them and the ELF cannot prove the archives link.
-rustflags = [
-    "--cfg", "espidf_time64",
-    "-C", "link-arg=-Wl,-u,esp_rtsp_service_create",
-    "-C", "link-arg=-Wl,-u,esp_capture_service_create",
-]
+rustflags = ["--cfg", "espidf_time64"]
 
 [unstable]
 build-std = ["std", "panic_abort"]

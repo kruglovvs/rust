@@ -37,6 +37,6 @@ pub fn print(arguments: std::fmt::Arguments<'_>) {
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {
-        $crate::logging::print(format_args!($($arg)*))
+        $crate::print(format_args!($($arg)*))
     };
 }

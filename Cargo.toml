@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["firmware", "components/media"]
+members = [
+    "firmware",
+    "components/logging",
+    "components/net",
+    "components/storage",
+    "components/media",
+]
 
 [workspace.package]
 rust-version = "1.85"
+
+[profile.release]
+opt-level = "z"

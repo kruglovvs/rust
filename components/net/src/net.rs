@@ -156,7 +156,6 @@ pub enum NetError {
     WifiNetifUp,
     MdnsInit,
     MdnsConfig,
-    ArtifactServer,
     ThreadSpawn,
 }
 
@@ -178,7 +177,6 @@ impl std::fmt::Display for NetError {
             Self::WifiNetifUp => write!(f, "station netif did not come up (15 s)"),
             Self::MdnsInit => write!(f, "EspMdns::take failed"),
             Self::MdnsConfig => write!(f, "mDNS hostname/service registration failed"),
-            Self::ArtifactServer => write!(f, "artifact HTTP server failed to start"),
             Self::ThreadSpawn => write!(f, "supervisor thread spawn failed"),
         }
     }
@@ -380,7 +378,6 @@ mod esp_impl {
     use esp_idf_svc::sys::EspError;
     use esp_idf_svc::wifi::{BlockingWifi, Configuration, EspWifi};
 
-    use crate::artifact_server;
     use crate::session::{self, Event, SessionAction};
 
     use super::{
@@ -452,13 +449,12 @@ mod esp_impl {
     }
 
     /// What `bring_up` hands back to the boot path (Todo 20). **Hold this for
-    /// the process lifetime**: dropping it drops the mDNS advertiser and the
-    /// artifact server. The Wi-Fi supervisor (and with it the Wi-Fi driver,
-    /// which it owns) runs on its own thread and is not stopped by dropping
-    /// this handle — the join handle only detaches.
+    /// the process lifetime**: dropping it drops the mDNS advertiser. The
+    /// Wi-Fi supervisor (and with it the Wi-Fi driver, which it owns) runs on
+    /// its own thread and is not stopped by dropping this handle — the join
+    /// handle only detaches.
     pub struct NetHandles {
         _mdns: EspMdns,
-        _artifact: esp_idf_svc::http::server::EspHttpServer<'static>,
         _supervisor: thread::JoinHandle<()>,
     }
 
@@ -501,7 +497,7 @@ mod esp_impl {
         EspSntp::new_with_callback(&conf, sync_callback)
     }
 
-    /// Bring up STA + mDNS + artifact server + SNTP and start the
+    /// Bring up STA + mDNS + SNTP and start the
     /// supervisor thread. The initial connect is attempted here but **its
     /// failure is not fatal**: the supervisor keeps retrying with backoff
     /// (plan acceptance: "disconnecting Wi-Fi tears the session down cleanly
@@ -583,7 +579,7 @@ mod esp_impl {
         }
 
         // mDNS: advertise the RTSP service so a consumer can find the board
-        // without knowing its IP (plan Do), plus the artifact endpoint.
+        // without knowing its IP (plan Do).
         let mut mdns = EspMdns::take().map_err(|_| NetError::MdnsInit)?;
         mdns.set_hostname(config.hostname.as_str())
             .map_err(|_| NetError::MdnsConfig)?;
@@ -597,27 +593,13 @@ mod esp_impl {
             &[("path", "/mjpeg/1")],
         )
         .map_err(|_| NetError::MdnsConfig)?;
-        mdns.add_service(
-            Some(config.instance_name.as_str()),
-            "_http",
-            "_tcp",
-            80,
-            &[("path", "/files/")],
-        )
-        .map_err(|_| NetError::MdnsConfig)?;
         ffi::log_info(
             "net",
             &format!(
-                "mdns: hostname={}.local service=_rtsp._tcp port={} txt=path:/mjpeg/1; service=_http._tcp port=80",
+                "mdns: hostname={}.local service=_rtsp._tcp port={} txt=path:/mjpeg/1",
                 config.hostname, config.rtsp_port
             ),
         );
-
-        // Artifact retrieval endpoint (plan Todo 14 "Owns the artifact-
-        // retrieval endpoint"): GET /files/<name>, read-only, capped.
-        let artifact =
-            artifact_server::start().map_err(|_| NetError::ArtifactServer)?;
-        ffi::log_info("net", "artifact server listening on :80 (GET /files/<name>, read-only, capped)");
 
         // SNTP — once the interface is up (plan). Handle goes into a static;
         // it can never be dropped by a caller.
@@ -657,7 +639,6 @@ mod esp_impl {
 
         Ok(NetHandles {
             _mdns: mdns,
-            _artifact: artifact,
             _supervisor: supervisor,
         })
     }

@@ -3,49 +3,21 @@ name = "esp32s3-av-firmware"
 version = "0.1.0"
 edition = "2021"
 
-# MSRV floor: 1.85 (raised from 1.82 for rusty_esp_video, Todo 6 audit outcome
-# may revert to 1.82 — see plan TL;DR and Todo 19).
 rust-version = "1.85"
 
 [dependencies]
 esp-idf-sys = { version = "=0.38.1", features = ["binstart"] }
-# Plan-pinned (plan dependency table, Todo 19): pre-added so parallel Wave 2
-# workers never race on this file for the shared pins.
 esp-idf-hal = "=0.47.0"
 esp-idf-svc = "=0.53.0"
-# The GMF/ADF media pipeline (DVP MJPEG + PDM G711U -> RTSP + AVI storage).
+logging = { path = "../components/logging" }
+net = { path = "../components/net" }
+storage = { path = "../components/storage" }
 media = { path = "../components/media" }
-# Plan-pinned (Todo 9; plan dependency table / Todo 19; ADR-0001 Part B).
-# `oxideav-avi` is the AVI muxer — sole mechanism behind IS-3 — audited CLEAN
-# on items 1/2/5/9 with the stated 629-test + cargo-fuzz exemption argument.
-# `oxideav-core` is NOT an extra choice: oxideav-avi's public API names its
-# types (StreamInfo, Packet, Muxer, WriteSeek, Error, ...) without re-exporting
-# them, so the adapter cannot compile without the type surface. The plan lists
-# "oxideav-avi + oxideav-core" as ONE dependency unit; ADR-0001 Part B item 2
-# obliges the adopter to pin both. oxideav-core is pinned to the exact version
-# oxideav-avi 0.0.10's own lock resolves (its caret "0.1" range unified).
-oxideav-avi = "=0.0.10"
-oxideav-core = "=0.1.39"
-# Plan Todo 12 — the plan's ONE new dependency (plan dependency table / Todo 19):
-# G.711 µ-law encode/decode, `#![no_std]`, `forbid(unsafe_code)`, zero mandatory
-# deps. Replaces hand-rolling the 256-entry compander table whose failure mode is
-# subtle distortion rather than a compile failure, and supplies the decoder that
-# makes the 256-code round-trip error assertion possible. `default-features = false`
-# keeps it dependency-free as the plan specifies.
-audio-codec-algorithms = { version = "=0.8", default-features = false }
-# Aligned sector buffers for the pre-mount filesystem probe.
-aligned = { version = "=0.4", default-features = false }
 
 [features]
-# Format SD card to FAT32 on first mount attempt (one-time, compile-time flag)
-sd-format-on-mount = []
-# Keep the pre-GMF Rust camera/mic/recorder loop. OFF by default: the GMF
-# pipeline owns capture, so enabling this would duplicate it.
-legacy-capture = []
+# Format the SD card to FAT32 on first mount attempt (one-time, compile-time flag).
+sd-format-on-mount = ["storage/sd-format-on-mount"]
 
 [package.metadata.esp-idf-sys]
 # Relative to this package dir. Pinned octal-PSRAM + test-headroom sdkconfig.
 esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
-
-[profile.release]
-opt-level = "z"
