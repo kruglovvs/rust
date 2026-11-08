@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["firmware"]
+members = ["firmware", "components/media"]
 
 [workspace.package]
 rust-version = "1.85"

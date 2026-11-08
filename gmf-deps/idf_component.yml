@@ -1,0 +1,16 @@
+version: "0.0.1"
+description: >-
+  Dependency-only helper for the ESP-ADF/GMF media pipeline. It overrides
+  esp_codec_dev because every 2.0.0-beta* release excludes IDF 5.5.2.
+overrides:
+  - espressif/esp_codec_dev:
+      with:
+        espressif/esp_codec_dev:
+          version: "1.6.2"
+      reason: >-
+        esp_capture (~1.1, pulled by esp_capture_service 0.5.1~1) depends on
+        esp_codec_dev (~2.0.0-beta1), but all 2.0.0-beta* releases require an
+        IDF version matching ">=5.4.4, !=5.5.0, !=5.5.1, !=5.5.2", which
+        excludes this project's IDF v5.5.2. esp_codec_dev 1.6.2 supports
+        IDF >=4.0 and provides the esp_codec_dev_open/read/close API that
+        esp_capture's audio device source uses.

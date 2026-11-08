@@ -1,0 +1,48 @@
+# ESP-IDF extra components for the ESP-ADF/GMF media pipeline.
+#
+# Loaded via the comma-separated ESP_IDF_SYS_EXTRA_COMPONENTS_FILE list in
+# `.cargo/config.toml` ("camera-extra.toml,net-extra.toml,rtsp-extra.toml"):
+# esp-idf-sys 0.38.1 `try_from_env` splits that list and merges every file's
+# `extra_components`.
+#
+# The pipeline is built entirely from managed Espressif components:
+#   * espressif/esp_capture_service  (SRC:  DVP camera MJPEG + mic G711U)
+#   * espressif/esp_rtsp_service     (SINK: ROLE_SERVER, MJPEG/G.711 over RTP)
+#   * espressif/esp_muxer_service    (SINK: AVI to SD)
+# plus their transitive ADF/GMF dependencies (esp_capture, esp_media_service,
+# esp_service, esp_muxer, gmf_core, media_lib_sal, esp_media_protocols, ...).
+#
+# Versions are pinned exactly ("0.5.1~1" etc.); never float them. The "~1"
+# suffix is part of the registry version string, not a semver range.
+#
+# ABSOLUTE paths for bindings_header are mandatory: when the config comes from
+# ESP_IDF_SYS_EXTRA_COMPONENTS_FILE, esp-idf-sys leaves `manifest_dir` empty,
+# so relative paths resolve against the build-script CWD rather than the
+# workspace (see camera-extra.toml for the same trap).
+#
+# `bindings_module = "gmf"` puts the generated declarations in their own
+# module (`esp_idf_sys::gmf`) instead of polluting the crate root, matching the
+# existing `esp_idf_sys::camera` pattern. bindings-gmf.h is a pure #include
+# aggregator so bindgen sees the real C API; no C/C++ shim is involved.
+
+[[extra_components]]
+remote_component = { name = "espressif/esp_capture_service", version = "0.5.1~1" }
+
+[[extra_components]]
+remote_component = { name = "espressif/esp_rtsp_service", version = "0.5.1~1" }
+
+[[extra_components]]
+remote_component = { name = "espressif/esp_muxer_service", version = "0.5.0~1" }
+
+[[extra_components]]
+bindings_module = "gmf"
+bindings_header = "/workspaces/rust/bindings-gmf.h"
+
+# Dependency-only local component (no sources) whose idf_component.yml carries
+# an `overrides` entry. Every esp_codec_dev 2.0.0-beta* release explicitly
+# excludes IDF 5.5.2 ("!=5.5.2") while esp_capture ~1.1 requires exactly that
+# beta range, so version solving is otherwise unsatisfiable. The override pins
+# esp_codec_dev to 1.6.2, which supports IDF >=4.0 and exposes the
+# open/read/close API used by esp_capture's audio device source.
+[[extra_components]]
+component_dirs = ["/workspaces/rust/gmf-deps"]

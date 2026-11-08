@@ -13,6 +13,8 @@ esp-idf-sys = { version = "=0.38.1", features = ["binstart"] }
 # workers never race on this file for the shared pins.
 esp-idf-hal = "=0.47.0"
 esp-idf-svc = "=0.53.0"
+# The GMF/ADF media pipeline (DVP MJPEG + PDM G711U -> RTSP + AVI storage).
+media = { path = "../components/media" }
 # Plan-pinned (Todo 9; plan dependency table / Todo 19; ADR-0001 Part B).
 # `oxideav-avi` is the AVI muxer — sole mechanism behind IS-3 — audited CLEAN
 # on items 1/2/5/9 with the stated 629-test + cargo-fuzz exemption argument.
@@ -37,6 +39,9 @@ aligned = { version = "=0.4", default-features = false }
 [features]
 # Format SD card to FAT32 on first mount attempt (one-time, compile-time flag)
 sd-format-on-mount = []
+# Keep the pre-GMF Rust camera/mic/recorder loop. OFF by default: the GMF
+# pipeline owns capture, so enabling this would duplicate it.
+legacy-capture = []
 
 [package.metadata.esp-idf-sys]
 # Relative to this package dir. Pinned octal-PSRAM + test-headroom sdkconfig.

@@ -97,3 +97,33 @@ CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
 #    is ESP-IDF's own allocator consistency check and fires with poisoning off,
 #    so a clean run with poisoning disabled is still real evidence.
 CONFIG_HEAP_POISONING_DISABLED=y
+
+# ESP-ADF/GMF media pipeline (esp_capture_service / esp_rtsp_service /
+# esp_muxer_service). Only the AVI muxer is needed for SD recording; every
+# other container in esp_muxer is compiled out to keep the image small.
+# Symbol names come from esp_muxer/Kconfig (CONFIG_ESP_MUXER_<TYPE>_SUPPORT).
+CONFIG_ESP_MUXER_AVI_SUPPORT=y
+CONFIG_ESP_MUXER_MP4_SUPPORT=n
+CONFIG_ESP_MUXER_TS_SUPPORT=n
+CONFIG_ESP_MUXER_OGG_SUPPORT=n
+CONFIG_ESP_MUXER_WAV_SUPPORT=n
+CONFIG_ESP_MUXER_FLV_SUPPORT=n
+CONFIG_ESP_MUXER_CAF_SUPPORT=n
+
+# MCP tooling is not used by this firmware. The per-service switches depend
+# on the global ESP_MCP_ENABLE (esp_service/Kconfig, default y); turning the
+# global off drops the MCP server/transport and the service tool schemas.
+CONFIG_ESP_MUXER_SERVICE_MCP_ENABLE=n
+CONFIG_ESP_RTSP_SERVICE_MCP_ENABLE=n
+CONFIG_ESP_MCP_ENABLE=n
+
+# Audio and video capture stay enabled: the pipeline is DVP camera MJPEG +
+# mic G711U. Do not set CONFIG_ESP_CAPTURE_ENABLE_AUDIO/VIDEO=n.
+
+# The ADF/GMF pipeline links ~3 MB of text+data, which does not fit the stock
+# 1 MB factory slot (partitions_singleapp.csv). Use a 4 MB factory app in the
+# 8 MB flash. esp-idf-sys builds from a generated CMake source dir, so IDF's
+# PROJECT_DIR is that dir, not the workspace; the Kconfig help explicitly
+# allows an absolute CSV path, which is required here.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/workspaces/rust/partitions.csv"

@@ -4,7 +4,14 @@ target = "xtensa-esp32s3-espidf"
 [target.'cfg(target_os = "espidf")']
 linker = "ldproxy"
 runner = "espflash flash --monitor"
-rustflags = [ "--cfg",  "espidf_time64"]
+# The pipeline entry points are not called yet (this is a build gate), so force
+# the component archive members into the final link. Without -u the linker's
+# --gc-sections drops them and the ELF cannot prove the archives link.
+rustflags = [
+    "--cfg", "espidf_time64",
+    "-C", "link-arg=-Wl,-u,esp_rtsp_service_create",
+    "-C", "link-arg=-Wl,-u,esp_capture_service_create",
+]
 
 [unstable]
 build-std = ["std", "panic_abort"]
@@ -19,7 +26,7 @@ ESP_IDF_TOOLS_INSTALL_DIR = "global"
 # (no in-tree components/mdns); it ships in net-extra.toml because
 # camera-extra.toml is frozen. The env var is comma-separated
 # (esp-idf-sys 0.38.1 try_from_env merges every listed file).
-ESP_IDF_SYS_EXTRA_COMPONENTS_FILE = "camera-extra.toml,net-extra.toml"
+ESP_IDF_SYS_EXTRA_COMPONENTS_FILE = "camera-extra.toml,net-extra.toml,rtsp-extra.toml"
 
 # Uncomment this if you have moved the target dir by setting CARGO_TARGET_DIR or similar.
 # Required for now due to embuild limitations.

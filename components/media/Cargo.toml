@@ -1,0 +1,14 @@
+[package]
+name = "media"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[dependencies]
+# Raw ESP-IDF bindings: the whole pipeline is `esp_idf_sys::gmf` plus the
+# I2S/I2C driver bindings. No C/C++ shim, no helper crate.
+esp-idf-sys = { version = "=0.38.1" }
+
+[package.metadata.esp-idf-sys]
+# The workspace build supplies `ESP_IDF_SYS_EXTRA_COMPONENTS_FILE`; this crate
+# deliberately has no extra-component metadata of its own.
