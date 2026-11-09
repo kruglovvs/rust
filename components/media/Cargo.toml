@@ -14,3 +14,8 @@ logging = { path = "../logging" }
 [package.metadata.esp-idf-sys]
 # The workspace build supplies `ESP_IDF_SYS_EXTRA_COMPONENTS_FILE`; this crate
 # deliberately has no extra-component metadata of its own.
+
+[features]
+# Link the AVI muxer sink. Off by default: its global-cache read
+# currently starves the RTSP video sink.
+avi-recording = []

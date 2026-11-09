@@ -34,12 +34,17 @@ use esp_idf_sys::gmf;
 const CAPTURE_SERVICE_NAME: &[u8] = b"capture\0";
 /// Wide-open RTSP service name.
 const RTSP_SERVICE_NAME: &[u8] = b"rtsp\0";
+/// Recording sink service name.
+const MUXER_SERVICE_NAME: &[u8] = b"muxer\0";
 /// RTSP path shared by the server URL.
 const RTSP_PATH: &str = "/live";
 /// Default stream id (`ESP_MEDIA_DEFAULT_STREAM`).
 const DEFAULT_STREAM: u16 = 0;
 /// Directory created under the mount point for AVI recordings.
 const RECORD_DIR: &str = "rec";
+/// AVI recording is opt-in: the muxer sink requests the provider's global
+/// cache, which currently starves the RTSP sink of video frames.
+const AVI_RECORDING: bool = cfg!(feature = "avi-recording");
 /// PDM microphone clock pin.
 const MIC_CLK_GPIO: i32 = 42;
 /// PDM microphone data pin.
@@ -86,6 +91,10 @@ pub enum Step {
     CaptureMuxerConfig,
     CaptureSetupApply,
     CaptureSetupDestroy,
+    MuxerService,
+    MuxerSetup,
+    MuxerLink,
+    MuxerStart,
     RtspService,
     RtspSetup,
     RtspUrl,
@@ -119,6 +128,10 @@ impl Step {
             Step::CaptureMuxerConfig => "capture_muxer_config",
             Step::CaptureSetupApply => "capture_setup_apply",
             Step::CaptureSetupDestroy => "capture_setup_destroy",
+            Step::MuxerService => "muxer_service",
+            Step::MuxerSetup => "muxer_setup",
+            Step::MuxerLink => "muxer_link",
+            Step::MuxerStart => "muxer_start",
             Step::RtspService => "rtsp_service",
             Step::RtspSetup => "rtsp_setup",
             Step::RtspUrl => "rtsp_url",
@@ -173,6 +186,7 @@ impl std::error::Error for Error {}
 fn thread_override(name: &str) -> Option<(u32, u8, i8)> {
     match name {
         "rtsp_server" | "rtsp_push" | "rtsp_src" => Some((8192, 1, 1)),
+        _ if name.contains("muxer") => Some((8192, 5, 1)),
         _ if name.contains("capture")
             || name.contains("venc")
             || name.contains("aenc")
@@ -189,16 +203,19 @@ fn thread_override(name: &str) -> Option<(u32, u8, i8)> {
 pub struct Pipeline {
     rtsp: *mut gmf::esp_rtsp_service_t,
     capture: *mut gmf::esp_capture_service_t,
+    muxer: *mut gmf::esp_muxer_service_t,
     dev_handle: gmf::esp_codec_dev_handle_t,
     data_if: *const gmf::audio_codec_data_if_t,
     i2s_rx: sys::i2s_chan_handle_t,
     i2c_bus: sys::i2c_master_bus_handle_t,
     linked: bool,
+    muxer_linked: bool,
     /// The RTSP start thread returned `Ok` (known only if it ever reports back).
     rtsp_started: bool,
     /// The RTSP start thread has been spawned and may still be inside start.
     rtsp_start_pending: bool,
     capture_started: bool,
+    muxer_started: bool,
     recording: bool,
     registered: bool,
 }
@@ -209,14 +226,17 @@ impl Pipeline {
         let mut pipeline = Pipeline {
             rtsp: std::ptr::null_mut(),
             capture: std::ptr::null_mut(),
+            muxer: std::ptr::null_mut(),
             dev_handle: std::ptr::null_mut(),
             data_if: std::ptr::null(),
             i2s_rx: std::ptr::null_mut(),
             i2c_bus: std::ptr::null_mut(),
             linked: false,
+            muxer_linked: false,
             rtsp_started: false,
             rtsp_start_pending: false,
             capture_started: false,
+            muxer_started: false,
             recording: !cfg.mount_point.is_empty(),
             registered: false,
         };
@@ -237,7 +257,7 @@ impl Pipeline {
 
     /// Whether AVI recording to the SD card is configured.
     pub fn recording(&self) -> bool {
-        self.recording
+        self.muxer_started
     }
 
     /// Whether the audio source (PDM microphone + codec device) is present.
@@ -307,7 +327,17 @@ impl Pipeline {
 
         // 8. Setup bundle: sources, tracks, muxer; apply and destroy.
         logging::log!("pipeline: 8 capture setup apply");
-        ffi::configure_capture(self.capture, &service_cfg, audio_src, video_src, cfg)?;
+        ffi::configure_capture(self.capture, &service_cfg, audio_src, video_src)?;
+
+        // 8b. Recording sink. esp_capture_service's built-in muxer has no AVI
+        //     support, so recording uses esp_muxer_service instead.
+        if AVI_RECORDING && !cfg.mount_point.is_empty() {
+            logging::log!("pipeline: 8b muxer service");
+            self.muxer = ffi::muxer_service(cfg)?;
+            logging::log!("pipeline: 8c muxer link");
+            ffi::link_muxer(self.capture, self.muxer)?;
+            self.muxer_linked = true;
+        }
 
         // 9. RTSP service.
         logging::log!("pipeline: 9 rtsp service");
@@ -322,12 +352,18 @@ impl Pipeline {
         ffi::link(self.capture, self.rtsp)?;
         self.linked = true;
 
-        // 11. Start capture before RTSP: the capture provider's tracks are only
-        // queryable while running, and the RTSP `on_start` hook asks the linked
-        // capture provider for its track list.
+        // 11. Start capture before the consumers: the capture provider's tracks
+        // are only queryable while running, and both the RTSP `on_start` hook
+        // and the muxer's track configuration ask the linked provider for them.
         logging::log!("pipeline: 11 start capture");
         ffi::start_capture(self.capture)?;
         self.capture_started = true;
+
+        if !self.muxer.is_null() {
+            logging::log!("pipeline: 11a start muxer");
+            ffi::start_muxer(self.muxer)?;
+            self.muxer_started = true;
+        }
 
         logging::log!("pipeline: 12 start rtsp (async)");
         let rtsp_ptr = self.rtsp as usize;
@@ -615,7 +651,6 @@ mod ffi {
         service_cfg: &gmf::esp_capture_service_cfg_t,
         audio_src: *mut gmf::esp_capture_audio_src_if_t,
         video_src: *mut gmf::esp_capture_video_src_if_t,
-        cfg: &Config<'_>,
     ) -> Result<(), Error> {
         let setup = unsafe { gmf::esp_capture_service_setup_create(service_cfg) };
         if setup.is_null() {
@@ -624,7 +659,7 @@ mod ffi {
             });
         }
 
-        let result = configure_setup(service, setup, audio_src, video_src, cfg);
+        let result = configure_setup(service, setup, audio_src, video_src);
         let destroy_code = unsafe { gmf::esp_capture_service_setup_destroy(setup) };
         result?;
         check(destroy_code, Step::CaptureSetupDestroy)
@@ -635,7 +670,6 @@ mod ffi {
         setup: *mut gmf::esp_capture_service_setup_t,
         audio_src: *mut gmf::esp_capture_audio_src_if_t,
         video_src: *mut gmf::esp_capture_video_src_if_t,
-        cfg: &Config<'_>,
     ) -> Result<(), Error> {
         let src_cfg = gmf::esp_capture_service_src_cfg_t {
             audio_src,
@@ -680,33 +714,64 @@ mod ffi {
             unsafe { gmf::esp_capture_service_setup_add_track(setup, DEFAULT_STREAM, &audio_track) };
         check(code, Step::CaptureTrackAudio)?;
 
-        // Storage muxer. Without a mounted card, disable file storage but keep
-        // the capture/stream path alive.
-        let storage = if cfg.mount_point.is_empty() {
-            None
-        } else {
-            let dir = format!("{}/{}", cfg.mount_point.trim_end_matches('/'), RECORD_DIR);
-            Some(CString::new(dir).map_err(|_| Error::Config {
-                step: Step::CaptureMuxerConfig,
-            })?)
-        };
-        let muxer = gmf::esp_capture_service_muxer_cfg_t {
-            muxer_type: gmf::esp_muxer_type_t_ESP_MUXER_TYPE_AVI,
-            auto_record: storage.is_some(),
-            streaming: false,
-            storage_dir: storage
-                .as_ref()
-                .map_or(null(), |dir| dir.as_ptr() as *const c_char),
-            slice_duration: 0,
-            ram_cache_size: MUXER_RAM_CACHE,
-        };
-        let code = unsafe {
-            gmf::esp_capture_service_setup_set_muxer_cfg(setup, DEFAULT_STREAM, &muxer)
-        };
-        check(code, Step::CaptureMuxerConfig)?;
-
         let code = unsafe { gmf::esp_capture_service_setup_apply(service, setup) };
         check(code, Step::CaptureSetupApply)
+    }
+
+    pub fn muxer_service(cfg: &Config<'_>) -> Result<*mut gmf::esp_muxer_service_t, Error> {
+        let mut service: *mut gmf::esp_muxer_service_t = null_mut();
+        let service_cfg = gmf::esp_muxer_service_cfg_t {
+            name: MUXER_SERVICE_NAME.as_ptr() as *const c_char,
+        };
+        let code = unsafe { gmf::esp_muxer_service_create(&service_cfg, &mut service) };
+        check(code, Step::MuxerService)?;
+        if service.is_null() {
+            return Err(Error::Null {
+                step: Step::MuxerService,
+            });
+        }
+
+        let dir = format!("{}/{}", cfg.mount_point.trim_end_matches('/'), RECORD_DIR);
+        let storage = CString::new(dir).map_err(|_| Error::Config {
+            step: Step::MuxerSetup,
+        })?;
+        let setup = gmf::esp_muxer_service_setup_t {
+            muxer_type: gmf::esp_muxer_type_t_ESP_MUXER_TYPE_AVI,
+            mode: gmf::esp_muxer_service_mode_t_ESP_MUXER_SERVICE_MODE_STORAGE_ONLY,
+            storage_dir: storage.as_ptr() as *const c_char,
+            slice_duration: 0,
+            ram_cache_size: MUXER_RAM_CACHE,
+            streaming_cache_size: 0,
+        };
+        let code = unsafe { gmf::esp_muxer_service_setup(service, &setup) };
+        if let Err(error) = check(code, Step::MuxerSetup) {
+            unsafe {
+                let _ = gmf::esp_media_service_deinit(service as *mut gmf::esp_service_t);
+                sys::free(service as *mut core::ffi::c_void);
+            }
+            return Err(error);
+        }
+        Ok(service)
+    }
+
+    pub fn link_muxer(
+        capture: *mut gmf::esp_capture_service_t,
+        muxer: *mut gmf::esp_muxer_service_t,
+    ) -> Result<(), Error> {
+        let code = unsafe {
+            gmf::esp_media_service_link(
+                capture as *mut gmf::esp_service_t,
+                DEFAULT_STREAM,
+                muxer as *mut gmf::esp_service_t,
+                DEFAULT_STREAM,
+            )
+        };
+        check(code, Step::MuxerLink)
+    }
+
+    pub fn start_muxer(service: *mut gmf::esp_muxer_service_t) -> Result<(), Error> {
+        let code = unsafe { gmf::esp_service_start(service as *mut gmf::esp_service_t) };
+        check(code, Step::MuxerStart)
     }
 
     pub fn rtsp_service(
@@ -826,9 +891,27 @@ mod ffi {
                 let _ = gmf::esp_service_stop(pipeline.capture as *mut gmf::esp_service_t);
                 pipeline.capture_started = false;
             }
+            if pipeline.muxer_started {
+                let _ = gmf::esp_service_stop(pipeline.muxer as *mut gmf::esp_service_t);
+                pipeline.muxer_started = false;
+            }
             if pipeline.linked {
                 let _ = unlink(pipeline.capture, pipeline.rtsp);
                 pipeline.linked = false;
+            }
+            if pipeline.muxer_linked {
+                let _ = gmf::esp_media_service_unlink(
+                    pipeline.capture as *mut gmf::esp_service_t,
+                    DEFAULT_STREAM,
+                    pipeline.muxer as *mut gmf::esp_service_t,
+                    DEFAULT_STREAM,
+                );
+                pipeline.muxer_linked = false;
+            }
+            if !pipeline.muxer.is_null() {
+                let _ = gmf::esp_media_service_deinit(pipeline.muxer as *mut gmf::esp_service_t);
+                sys::free(pipeline.muxer as *mut core::ffi::c_void);
+                pipeline.muxer = null_mut();
             }
             if !pipeline.rtsp.is_null() {
                 let _ = gmf::esp_media_service_deinit(pipeline.rtsp as *mut gmf::esp_service_t);
@@ -925,6 +1008,7 @@ mod tests {
         assert_eq!(thread_override("rtsp_src"), Some((8192, 1, 1)));
         assert_eq!(thread_override("video_capture"), Some((8192, 8, 0)));
         assert_eq!(thread_override("VID_SRC"), Some((8192, 8, 0)));
+        assert_eq!(thread_override("muxer_sink"), Some((8192, 5, 1)));
         // Unknown threads get `None`, which the callback maps to ESP_ERR_NOT_FOUND.
         assert_eq!(thread_override("mystery_thread"), None);
     }

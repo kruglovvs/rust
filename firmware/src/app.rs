@@ -146,6 +146,7 @@ pub fn run() -> ! {
             if tick % 10 == 0 {
                 let (free, largest, spiram) = heap_sample();
                 logging::log!("boot: heartbeat internal_free={free} largest={largest} spiram_free={spiram}");
+                log_recordings();
             }
         }
     }
@@ -195,6 +196,26 @@ fn raise_rtsp_log_level() {
                 esp_idf_svc::sys::esp_log_level_t_ESP_LOG_DEBUG,
             );
         }
+    }
+}
+
+#[cfg(feature = "rtsp-selftest")]
+fn log_recordings() {
+    let dir = format!("{}/rec", storage::BASE_PATH);
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            let mut found = false;
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                logging::log!("rec: file={:?} bytes={len}", name.to_string_lossy());
+                found = true;
+            }
+            if !found {
+                logging::log!("rec: {dir} is empty");
+            }
+        }
+        Err(error) => logging::log!("rec: listing {dir} failed: {error}"),
     }
 }
 

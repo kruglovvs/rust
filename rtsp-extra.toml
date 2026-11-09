@@ -46,3 +46,4 @@ bindings_header = "/workspaces/rust/bindings-gmf.h"
 # open/read/close API used by esp_capture's audio device source.
 [[extra_components]]
 component_dirs = ["/workspaces/rust/gmf-deps"]
+

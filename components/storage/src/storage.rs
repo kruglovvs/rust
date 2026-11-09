@@ -1134,40 +1134,35 @@ impl<'d> Storage<'d> {
                 detail: source.to_string(),
             })?;
 
-        // If format-on-mount is enabled, format the card before mounting.
+        // `Fatfs::format` enters the VFS layer and never returns on this board,
+        // so format the registered diskio drive directly with FatFs instead.
         #[cfg(feature = "sd-format-on-mount")]
         {
             println!(
-                "storage: sd-format-on-mount enabled; attempting FAT32 format on {} before mount",
+                "storage: sd-format-on-mount enabled; formatting {} as exFAT via f_mkfs",
                 cs.label()
             );
 
-            use esp_idf_svc::fs::fatfs::config::{FatFsType, FormatConfiguration};
-
-            let format_config = FormatConfiguration {
-                fs_type: FatFsType::Fat32,
-                ..Default::default()
+            let mut work: Aligned<A4, [u8; 4096]> = Aligned([0u8; 4096]);
+            let parm = esp_idf_sys::MKFS_PARM {
+                fmt: (esp_idf_sys::FM_EXFAT | esp_idf_sys::FM_SFD) as u8,
+                n_fat: 0,
+                align: 0,
+                n_root: 0,
+                au_size: 0,
             };
-
-            // Use a 4 KiB work buffer for the format operation.
-            let mut work_buf = [0u8; 4096];
-
-            match fatfs.format(&format_config, &mut work_buf) {
-                Ok(()) => {
-                    println!(
-                        "storage: FAT32 format succeeded on {} (before mount)",
-                        cs.label()
-                    );
-                }
-                Err(fmt_err) => {
-                    let format_failed = StorageError::FormatFailed {
-                        cs,
-                        source: fmt_err,
-                    };
-                    println!("storage: ERROR: {format_failed}");
-                    return Err(format_failed);
-                }
-            }
+            // SAFETY: the drive path is a NUL-terminated C string, the MKFS_PARM
+            // outlives the call, and `work` is a live 4 KiB buffer whose length
+            // is passed exactly; FatFs retains neither pointer.
+            let result = unsafe {
+                esp_idf_sys::f_mkfs(
+                    c"0:".as_ptr(),
+                    &parm,
+                    work.as_mut_ptr() as *mut core::ffi::c_void,
+                    work.len() as u32,
+                )
+            };
+            println!("storage: f_mkfs EXFAT|SFD result={result}");
         }
 
         let chain = MountedFatfs::mount(fatfs, BASE_PATH, MAX_OPEN_FILES).map_err(|source| {
