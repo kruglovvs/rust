@@ -6,4 +6,4 @@ bindings_module = "camera"
 # empty (only [[package.metadata.esp-idf-sys.extra_components]] in Cargo.toml
 # sets it), so a relative "bindings.h" resolves against the build script's CWD,
 # not the workspace. See build/native/cargo_driver/config.rs env-file branch.
-bindings_header = "/workspaces/rust/bindings.h"
+bindings_header = "/workspaces/rust/firmware/bindings.h"

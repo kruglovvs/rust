@@ -6,8 +6,8 @@
 //! `#[path]` include compiles them unchanged on the host and their
 //! `#[cfg(test)]` suites RUN here (no board needed).
 
-#[path = "../../components/net/src/session.rs"]
+#[path = "../../firmware/components/net/src/session.rs"]
 mod session;
 
-#[path = "../../components/net/src/net.rs"]
+#[path = "../../firmware/components/net/src/net.rs"]
 mod net;

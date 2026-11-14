@@ -216,7 +216,6 @@ pub struct Pipeline {
     rtsp_start_pending: bool,
     capture_started: bool,
     muxer_started: bool,
-    recording: bool,
     registered: bool,
 }
 
@@ -237,7 +236,6 @@ impl Pipeline {
             rtsp_start_pending: false,
             capture_started: false,
             muxer_started: false,
-            recording: !cfg.mount_point.is_empty(),
             registered: false,
         };
 

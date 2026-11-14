@@ -126,7 +126,7 @@ CONFIG_ESP_MCP_ENABLE=n
 # PROJECT_DIR is that dir, not the workspace; the Kconfig help explicitly
 # allows an absolute CSV path, which is required here.
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/workspaces/rust/partitions.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/workspaces/rust/firmware/partitions.csv"
 
 # RTSP/media timing and UDP pool parity with Espressif's own example.
 #

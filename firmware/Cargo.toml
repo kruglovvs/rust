@@ -9,10 +9,10 @@ rust-version = "1.85"
 esp-idf-sys = { version = "=0.38.1", features = ["binstart"] }
 esp-idf-hal = "=0.47.0"
 esp-idf-svc = "=0.53.0"
-logging = { path = "../components/logging" }
-net = { path = "../components/net" }
-storage = { path = "../components/storage" }
-media = { path = "../components/media" }
+logging = { path = "components/logging" }
+net = { path = "components/net" }
+storage = { path = "components/storage" }
+media = { path = "components/media" }
 
 [features]
 # Format the SD card to FAT32 on first mount attempt (one-time, compile-time flag).

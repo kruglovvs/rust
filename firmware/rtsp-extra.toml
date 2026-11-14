@@ -36,7 +36,7 @@ remote_component = { name = "espressif/esp_muxer_service", version = "0.5.0~1" }
 
 [[extra_components]]
 bindings_module = "gmf"
-bindings_header = "/workspaces/rust/bindings-gmf.h"
+bindings_header = "/workspaces/rust/firmware/bindings-gmf.h"
 
 # Dependency-only local component (no sources) whose idf_component.yml carries
 # an `overrides` entry. Every esp_codec_dev 2.0.0-beta* release explicitly
@@ -45,5 +45,5 @@ bindings_header = "/workspaces/rust/bindings-gmf.h"
 # esp_codec_dev to 1.6.2, which supports IDF >=4.0 and exposes the
 # open/read/close API used by esp_capture's audio device source.
 [[extra_components]]
-component_dirs = ["/workspaces/rust/gmf-deps"]
+component_dirs = ["/workspaces/rust/firmware/gmf-deps"]
 

@@ -22,7 +22,7 @@ esp_capture_service (DVP OV3660 -> MJPEG, PDM mic -> G711U)
 
 `firmware/src/main.rs` is 24 lines; `firmware/src/app.rs` brings up netif,
 storage and Wi-Fi, waits for a station address, then starts `media::Pipeline`
-and idles. Reusable Rust libraries live in `components/{logging,net,storage,media}`.
+and idles. Reusable Rust libraries live in `firmware/components/{logging,net,storage,media}`.
 
 Verified on hardware: `OPTIONS` returns `200 OK`, `DESCRIBE` returns an SDP
 with `JPEG/90000` and `PCMU/8000`, and live 10 s sessions over TCP

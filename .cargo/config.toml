@@ -19,7 +19,7 @@ ESP_IDF_TOOLS_INSTALL_DIR = "global"
 # (no in-tree components/mdns); it ships in net-extra.toml because
 # camera-extra.toml is frozen. The env var is comma-separated
 # (esp-idf-sys 0.38.1 try_from_env merges every listed file).
-ESP_IDF_SYS_EXTRA_COMPONENTS_FILE = "camera-extra.toml,net-extra.toml,rtsp-extra.toml"
+ESP_IDF_SYS_EXTRA_COMPONENTS_FILE = "/workspaces/rust/firmware/camera-extra.toml,/workspaces/rust/firmware/net-extra.toml,/workspaces/rust/firmware/rtsp-extra.toml"
 
 # Uncomment this if you have moved the target dir by setting CARGO_TARGET_DIR or similar.
 # Required for now due to embuild limitations.

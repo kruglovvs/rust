@@ -2,10 +2,10 @@
 resolver = "2"
 members = [
     "firmware",
-    "components/logging",
-    "components/net",
-    "components/storage",
-    "components/media",
+    "firmware/components/logging",
+    "firmware/components/net",
+    "firmware/components/storage",
+    "firmware/components/media",
 ]
 
 [workspace.package]
