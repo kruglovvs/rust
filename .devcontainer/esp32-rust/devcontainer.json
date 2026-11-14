@@ -47,7 +47,9 @@
     "customizations": {
         "vscode": {
             "settings": {
-                "rust-analyzer.cargo.target": "xtensa-esp32s3-espidf" // Для ESP32 (стандартная/std)
+                // Target is pinned per workspace in firmware/.cargo/config.toml
+                // (xtensa) and harness/.cargo/config.toml (x86_64); a global
+                // override here would force the host harness to cross-compile.
             },
             "extensions": [
                 "rust-lang.rust-analyzer",

@@ -53,6 +53,21 @@ Known limitation:
   cache, which starves the RTSP video sink and still leaves `muxed_0.avi`
   empty. The cause is inside the vendor sink, not the pipeline wiring.
 
+## Repository Layout
+
+Two independent cargo workspaces, each with its own toolchain and cargo config:
+
+```
+firmware/            xtensa-esp32s3-espidf; .cargo/config.toml, rust-toolchain.toml,
+                     sdkconfig.defaults, components/, gmf-deps/, bindings, partitions.csv
+harness/             host x86_64; .cargo/config.toml, rust-toolchain.toml, tests/
+scripts/             build / flash / device-test / quality harness entry points
+```
+
+Nothing at the repository root overrides either workspace's target, so
+`cargo test` in `harness/` stays on the host and `cargo build` in `firmware/`
+stays on the ESP32-S3.
+
 ## Build and Host Checks
 
 ```bash
