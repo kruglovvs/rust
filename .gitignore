@@ -12,8 +12,6 @@ target/
 .omo/
 .opencode/state/
 
-# Stray host file, not part of firmware scaffold
-ff-fmt.texi
 
 # Host tooling (not firmware)
 node_modules/

@@ -55,7 +55,7 @@ case "$tcp_port" in ''|*[!0-9]*) tcp_port=554 ;; esac
 [ -n "$host" ] || { echo "cannot parse a host from $URL" >&2; exit 3; }
 
 if [ "$FLASH" = 1 ]; then
-  art="${CARGO_TARGET_DIR:-$ROOT/target}/xtensa-esp32s3-espidf/debug"
+  art="${CARGO_TARGET_DIR:-$ROOT/firmware/target}/xtensa-esp32s3-espidf/debug"
   if [ ! -x "$art/esp32s3-av-firmware" ]; then
     echo "[1/4] building firmware (no artifact at $art)"
     "$ROOT/scripts/build-firmware.sh" || { echo "build failed" >&2; exit 3; }

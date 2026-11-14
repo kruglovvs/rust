@@ -79,13 +79,10 @@ CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
 #
 # Two findings are baked into this file's history and must not be undone:
 #
-# 1. This file is reached through the repo-root SYMLINK `sdkconfig.defaults`.
-#    `esp-idf-sys` registers `rerun-if-changed=<workspace>/sdkconfig.defaults`
+# 1. `esp-idf-sys` registers `rerun-if-changed=<workspace>/sdkconfig.defaults`
 #    and resolves `esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]` against
-#    the WORKSPACE directory. When that symlink was replaced by a stale regular
-#    file, every edit made here was silently discarded and the chip kept
-#    building the old values. `git ls-files -s sdkconfig.defaults` must report
-#    mode `120000`. If it reports `100644`, this pipeline is broken again.
+#    the WORKSPACE directory. Since firmware/ is its own workspace, this file
+#    is that path: do not edit a copy elsewhere and expect it to be used.
 #
 # 2. Comprehensive poisoning poisons every alloc/free. It is the correct setting
 #    for the Todo 23 corruption proof but makes the allocator slow enough to
