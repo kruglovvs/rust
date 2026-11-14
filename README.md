@@ -52,9 +52,31 @@ flowchart LR
 ```
 
 Reusable Rust crates: `firmware/components/{logging,net,storage,media}`.
-Capture geometry is build-time: `VIDEO_WIDTH`, `VIDEO_HEIGHT`, `VIDEO_FPS`
-(defaults 640×480 @ 10). The DVP clock is 10 MHz — at 20 MHz the sensor emits
-~74% corrupt VGA JPEGs (green/coloured bands).
+
+### Capture geometry
+
+Sizes are fixed by the DVP source; anything else silently falls back to QVGA.
+Measured with the sensor at 10 MHz:
+
+| Size | Video | Stability |
+|---|---|---|
+| 320×240 | 10 fps | stable |
+| **640×480 (default)** | ~8-9 fps, 0 corrupt | stable for 60 s, audio 60.0 s |
+| 1024×768 | 4.3 fps | capture stalls after ~18 s |
+| 1280×720 | 1-2.4 fps | stalls after 4-11 s |
+| 1920×1080 | 1.36 fps, 8.6 Mbps | audio starves after ~8 s |
+
+Full HD is configurable and really does deliver 1080p frames, but the capture
+sync cannot sustain it, so VGA is the default. The DVP clock is 10 MHz; at
+20 MHz the sensor emits ~74% corrupt VGA JPEGs (green/coloured bands).
+
+### Audio
+
+G.711 µ-law, 8000 Hz mono, RTP payload type 0. RFC 3551 fixes PT 0 at 8 kHz,
+so the track must advertise 8000 Hz; a 16 kHz track made every client play the
+stream at half speed (a 10 s capture became 20 s of audio). The mic runs at
+16 kHz and is resampled by the capture path. `audio_track_matches_the_static_g711_clock`
+in `components/media` guards the rate.
 
 ## Harness Architecture
 
@@ -82,9 +104,10 @@ flowchart LR
 
 ## Devcontainer
 
-Image `espressif/idf-rust:esp32s3_latest` plus a containerfile that installs
-ESP-IDF v5.5.2 (`/opt/esp/idf`, tools in `/opt/esp/idf-tools`), ffmpeg and
-serial diagnostics. Environment (set in `containerEnv`):
+The `espressif/idf-rust:esp32s3_latest` image ships the Xtensa **Rust**
+toolchain but no ESP-IDF (its layer history only adds Debian, `rustup` and
+`espup`), so the containerfile installs ESP-IDF v5.5.2 (`/opt/esp/idf`, tools
+in `/opt/esp/idf-tools`), ffmpeg and serial diagnostics. Environment (set in `containerEnv`):
 `IDF_PATH`, `IDF_TOOLS_PATH`, `RUSTUP_HOME=/home/esp/.rustup`,
 `CARGO_HOME=/home/esp/.cargo`. `/dev` is bind-mounted so `ttyACM*` appears
 without restarting the container.
@@ -135,4 +158,8 @@ other secret there.
   `esp_muxer_service` sink requests the capture provider's global cache, which
   starves the RTSP video sink, and the file stays empty. The cause is inside
   the vendor sink.
+- Sizes above 640×480 configure successfully but the capture pipeline stalls
+  (see the geometry table), so they are not usable for a live stream yet.
+- The PDM path has no codec chip, so `esp_codec_dev` gain control is a no-op;
+  the mic level is what the sensor delivers (peaks around −17 dBFS).
 - Device tests, flashing and the live capture require the board attached.

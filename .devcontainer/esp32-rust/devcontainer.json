@@ -59,8 +59,9 @@
                 "ms-vscode.cpptools-extension-pack",
                 "vadimcn.vscode-lldb",
                 "marus25.cortex-debug",
-                "Zerotaskx.rust-extension-pack",
-                "JScearcy.rust-doc-viewer"
+                "JScearcy.rust-doc-viewer",
+                "fill-labs.dependi",
+                "panicbit.cargo"
             ]
         }
     }

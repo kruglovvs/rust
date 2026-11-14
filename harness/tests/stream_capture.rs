@@ -74,7 +74,7 @@ fn live_stream_matches_the_configured_geometry() {
     }
 
     let options = Options { width, height, min_frames: 10, min_duration: 5.0 };
-    let _verdict = report(&out, &options).expect("analysis");
+    let _outcome = report(&out, &options).expect("analysis");
 
     let metrics = std::fs::read_to_string(out.join("metrics.json"))
         .expect("analyser must produce metrics.json");

@@ -35,7 +35,7 @@ fn main() {
         }
     }
     match report(&PathBuf::from(outdir), &options) {
-        Ok(verdict) => std::process::exit(verdict.code()),
+        Ok(outcome) => std::process::exit(outcome.verdict.code()),
         Err(error) => {
             eprintln!("analyze: {error}");
             std::process::exit(2);

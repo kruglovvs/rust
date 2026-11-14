@@ -37,6 +37,14 @@ impl Default for Options {
 }
 
 /// Outcome of an analysis run.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    pub verdict: Verdict,
+    pub failed: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Overall verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Pass,
@@ -395,12 +403,55 @@ fn json_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+#[derive(Debug, Default, Clone)]
+struct AudioStats {
+    seconds: f64,
+    dc: f64,
+    ac_rms_db: f64,
+    peak: i32,
+}
+
+fn audio_stats(path: &Path, sample_rate: u64) -> Result<Option<AudioStats>, String> {
+    if sample_rate == 0 {
+        return Ok(None);
+    }
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:a:0", "-f", "s16le", "-acodec", "pcm_s16le", "-"])
+        .output()
+        .map_err(|error| format!("ffmpeg audio decode: {error}"))?;
+    if !output.status.success() || output.stdout.len() < 2 {
+        return Ok(None);
+    }
+    let samples: Vec<i32> = output
+        .stdout
+        .chunks_exact(2)
+        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as i32)
+        .collect();
+    let count = samples.len() as f64;
+    let mean = samples.iter().map(|&s| s as f64).sum::<f64>() / count;
+    let ac_rms = (samples
+        .iter()
+        .map(|&s| (s as f64 - mean).powi(2))
+        .sum::<f64>()
+        / count)
+        .sqrt();
+    let peak = samples.iter().map(|s| s.abs()).max().unwrap_or(0);
+    Ok(Some(AudioStats {
+        seconds: count / sample_rate as f64,
+        dc: mean,
+        ac_rms_db: 20.0 * (ac_rms.max(1.0) / 32768.0).log10(),
+        peak,
+    }))
+}
+
 /// Analyze a recording directory and print a human report.
 ///
 /// Expects `stream.mkv`, `video.mjpeg` (concatenated JPEG frames) and
 /// optionally `audio.wav` in `outdir`. Writes `metrics.json` there and
 /// returns a [`Verdict`].
-pub fn report(outdir: &Path, opts: &Options) -> Result<Verdict, String> {
+pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
     let mkv = outdir.join("stream.mkv");
     let mjpeg = outdir.join("video.mjpeg");
     let probe = probe(&mkv)?;
@@ -425,6 +476,11 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Verdict, String> {
     let warnings = classify_warnings(&mkv)?;
     let jpeg = jpeg_stats(&mjpeg)?;
     let colour = signal_stats(&mkv)?;
+    let audio_rate = audio
+        .as_ref()
+        .and_then(|stream| integer(stream, "sample_rate"))
+        .unwrap_or(0);
+    let levels = audio_stats(&mkv, audio_rate)?;
 
     let blur_mean = number_after(&blur_log, "blur mean:");
     let block_mean = number_after(&block_log, "block mean:");
@@ -432,6 +488,7 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Verdict, String> {
     let black_total = sum_after(&black_log, "black_duration:").max(0.0);
 
     let mut checks: Vec<(String, bool, String)> = Vec::new();
+    let mut warns: Vec<String> = Vec::new();
     let mut check = |name: String, ok: bool, detail: String| {
         checks.push((name, ok, detail));
     };
@@ -471,6 +528,31 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Verdict, String> {
         None => check("audio stream present".into(), false, "missing".into()),
     }
 
+    if let Some(levels) = &levels {
+        if duration > 0.0 {
+            let ratio = levels.seconds / duration;
+            check(
+                format!(
+                    "audio duration matches video ({:.2}s vs {:.2}s)",
+                    levels.seconds, duration
+                ),
+                (0.9..=1.1).contains(&ratio),
+                format!("ratio {ratio:.2}"),
+            );
+        }
+        check(
+            "audio not silent".into(),
+            levels.ac_rms_db > -60.0,
+            format!("{:.1} dBFS AC RMS", levels.ac_rms_db),
+        );
+        if levels.ac_rms_db < -40.0 {
+            warns.push(format!(
+                "audio is quiet ({:.1} dBFS AC RMS, peak {})",
+                levels.ac_rms_db, levels.peak
+            ));
+        }
+    }
+
     let corrupt_ratio = if frames > 0 {
         warnings.corrupt_dc as f64 / frames as f64
     } else {
@@ -481,7 +563,6 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Verdict, String> {
     check("jpeg header valid".into(), warnings.invalid_size == 0,
         format!("{} frames with invalid picture size", warnings.invalid_size));
 
-    let mut warns: Vec<String> = Vec::new();
     if jpeg.truncated > 0 {
         warns.push(format!(
             "{} truncated JPEG frame(s) - green bands",
@@ -542,6 +623,12 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Verdict, String> {
             field(audio, "codec_name").unwrap_or("?"), rate, channels,
             audio_bitrate as f64 / 1000.0);
     }
+    if let Some(levels) = &levels {
+        println!(
+            "audio level     {:.1} dBFS AC RMS, DC {:.0}, peak {}",
+            levels.ac_rms_db, levels.dc, levels.peak
+        );
+    }
     println!("jpeg frames     {} ({} B median, {}-{} B)", jpeg.frames, jpeg.median, jpeg.min, jpeg.max);
     println!("jpeg integrity  {} truncated, {} short, {} stray B, dims {}",
         jpeg.truncated, jpeg.short, jpeg.garbage, dims_text(&jpeg.dims));
@@ -587,6 +674,13 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Verdict, String> {
             let _ = writeln!(json, "  \"audio\": null,");
         }
     }
+    if let Some(levels) = &levels {
+        let _ = writeln!(
+            json,
+            "  \"audio_level\": {{\"seconds\": {:.3}, \"ac_rms_db\": {:.2}, \"dc\": {:.1}, \"peak\": {}}},",
+            levels.seconds, levels.ac_rms_db, levels.dc, levels.peak
+        );
+    }
     let _ = writeln!(json, "  \"jpeg\": {{\"frames\": {}, \"truncated\": {}, \"short\": {}, \"garbage_bytes\": {}, \"median_bytes\": {}, \"dimensions\": \"{}\"}},",
         jpeg.frames, jpeg.truncated, jpeg.short, jpeg.garbage, jpeg.median, dims_text(&jpeg.dims));
     let _ = writeln!(json, "  \"blur_mean\": {}, \"block_mean\": {},",
@@ -600,11 +694,24 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Verdict, String> {
     let _ = writeln!(json, "}}");
     std::fs::write(outdir.join("metrics.json"), json).map_err(|error| error.to_string())?;
 
+    let failed_names: Vec<String> = checks
+        .iter()
+        .filter(|(_, ok, _)| !ok)
+        .map(|(name, _, _)| name.clone())
+        .collect();
     if failed > 0 {
         println!("\nRESULT: FAIL ({failed} check(s))");
-        Ok(Verdict::Fail)
+        Ok(Outcome {
+            verdict: Verdict::Fail,
+            failed: failed_names,
+            warnings: warns,
+        })
     } else {
         println!("\nRESULT: PASS{}", if warns.is_empty() { "" } else { " with warnings" });
-        Ok(Verdict::Pass)
+        Ok(Outcome {
+            verdict: Verdict::Pass,
+            failed: Vec::new(),
+            warnings: warns,
+        })
     }
 }
