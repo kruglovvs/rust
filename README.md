@@ -112,6 +112,7 @@ binary (filters do not reach `app_main`), and a click costs one flash (~40 s).
 ```bash
 ./scripts/build-firmware.sh          # VIDEO_WIDTH=320 VIDEO_HEIGHT=240 ...
 ./scripts/flash.sh [PORT]            # flashes ELF + partition table
+./scripts/monitor.sh [PORT]          # serial console (add --after no-reset to keep it running)
 ./harness/stream_quality.sh          # flash, wait, record 60 s, analyse
 ffplay -rtsp_transport tcp rtsp://<board-ip>:554/live
 ```

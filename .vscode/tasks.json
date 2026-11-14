@@ -82,6 +82,18 @@
       },
       "problemMatcher": [],
       "group": "test"
+    },
+    {
+      "label": "ESP32-S3: Serial monitor",
+      "type": "process",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/scripts/monitor.sh"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
     }
   ]
 }
