@@ -23,4 +23,4 @@ ESP_IDF_SYS_EXTRA_COMPONENTS_FILE = "/workspaces/rust/firmware/camera-extra.toml
 
 # Uncomment this if you have moved the target dir by setting CARGO_TARGET_DIR or similar.
 # Required for now due to embuild limitations.
-#CARGO_WORKSPACE_DIR = { value = "", relative = true }
+CARGO_WORKSPACE_DIR = { value = "", relative = true }

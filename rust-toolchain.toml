@@ -1,4 +1,8 @@
+# The project builds with the custom `esp` rustup toolchain (rustc 1.93
+# nightly), which ships both the xtensa-esp32s3-espidf target and the
+# x86_64-unknown-linux-gnu host std the harness needs. Pinning it here makes
+# rust-analyzer, `cargo test` and rustup agree; the previous pin
+# (nightly-2026-10-15) is not installed in this image.
 [toolchain]
-channel = "nightly-2026-10-15"
+channel = "esp"
 components = ["rust-src"]
-targets = ["xtensa-esp32s3-espidf"]
