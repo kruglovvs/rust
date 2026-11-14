@@ -2,7 +2,12 @@ FROM espressif/idf-rust:esp32s3_latest
 USER root
 
 # (Предыдущие шаги установки Node.js и обновления npm...)
-RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm curl ca-certificates && rm -rf /var/lib/apt/lists/*
+# ffmpeg/ffprobe: stream capture + artefact analysis (harness/stream_quality.sh)
+# usbutils/iproute2/procps/psmisc: serial and USB diagnostics (lsusb, ip, ps, fuser)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      nodejs npm curl ca-certificates \
+      ffmpeg usbutils iproute2 procps psmisc \
+    && rm -rf /var/lib/apt/lists/*
 # RUN npm install -g n && n lts
 RUN hash -r && npm install -g node@latest
 # RUN hash -r && npm install -g npm@latest

@@ -412,8 +412,21 @@ fn write_wifi_credentials() {
         .ok()
         .map(|contents| parse_wifi_credentials(&contents));
     let (ssid, password) = values.unwrap_or_default();
+    let video_value = |key: &str, default: u32| {
+        println!("cargo:rerun-if-env-changed={key}");
+        env::var(key)
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default)
+    };
+    let width = video_value("VIDEO_WIDTH", 640);
+    let height = video_value("VIDEO_HEIGHT", 480);
+    let fps = video_value("VIDEO_FPS", 10);
     let generated = format!(
-        "pub const WIFI_SSID: Option<&str> = {}\n;pub const WIFI_PASSWORD: Option<&str> = {}\n;",
+        "pub const WIFI_SSID: Option<&str> = {}\n;pub const WIFI_PASSWORD: Option<&str> = {};\
+         \npub const VIDEO_WIDTH: u32 = {width};\npub const VIDEO_HEIGHT: u32 = {height};\
+         \npub const VIDEO_FPS: u32 = {fps};\n",
         rust_option(ssid.as_deref()),
         rust_option(password.as_deref())
     );

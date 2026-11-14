@@ -9,5 +9,5 @@ pub mod storage;
 
 pub use storage::*;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sd-format-on-mount"))]
 pub(crate) static HIL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

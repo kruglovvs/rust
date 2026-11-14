@@ -66,6 +66,29 @@ pub struct Config<'a> {
     pub mount_point: &'a str,
     /// RTSP local port.
     pub port: u16,
+    /// Requested video width in pixels (sensor/pipeline negotiate the closest
+    /// supported size; 640x480 is VGA, 320x240 is QVGA).
+    pub width: u32,
+    /// Requested video height in pixels.
+    pub height: u32,
+    /// Requested frame rate in frames per second.
+    pub fps: u32,
+}
+
+impl Config<'_> {
+    /// Reject geometry the sensor and pipeline cannot honour.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.width == 0 || self.height == 0 {
+            return Err(Error::InvalidConfig("width and height must be non-zero"));
+        }
+        if self.width % 2 != 0 || self.height % 2 != 0 {
+            return Err(Error::InvalidConfig("width and height must be even"));
+        }
+        if self.fps == 0 || self.fps > 30 {
+            return Err(Error::InvalidConfig("fps must be in 1..=30"));
+        }
+        Ok(())
+    }
 }
 
 /// One discrete pipeline construction/teardown step, used to name failures.
@@ -158,6 +181,8 @@ pub enum Error {
     Null { step: Step },
     /// A configuration string could not be converted to a `CString`.
     Config { step: Step },
+    /// A configuration value is outside the supported range.
+    InvalidConfig(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -171,6 +196,9 @@ impl fmt::Display for Error {
             }
             Error::Config { step } => {
                 write!(f, "media pipeline: step `{step}` received an invalid configuration string")
+            }
+            Error::InvalidConfig(reason) => {
+                write!(f, "media pipeline: invalid configuration: {reason}")
             }
         }
     }
@@ -199,6 +227,23 @@ fn thread_override(name: &str) -> Option<(u32, u8, i8)> {
     }
 }
 
+/// Build the MJPEG track description from the requested geometry.
+fn video_track_info(cfg: &Config<'_>) -> gmf::esp_media_track_info_t {
+    gmf::esp_media_track_info_t {
+        id: 1,
+        type_: gmf::esp_media_track_type_t_ESP_MEDIA_TRACK_TYPE_VIDEO,
+        info: gmf::esp_media_track_info_t__bindgen_ty_1 {
+            video: gmf::esp_media_video_info_t {
+                codec: gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_MJPEG as u32,
+                width: cfg.width as u16,
+                height: cfg.height as u16,
+                fps: cfg.fps as u16,
+                bitrate: 0,
+            },
+        },
+    }
+}
+
 /// Owns every handle of the running media pipeline.
 pub struct Pipeline {
     rtsp: *mut gmf::esp_rtsp_service_t,
@@ -222,6 +267,7 @@ pub struct Pipeline {
 impl Pipeline {
     /// Build and start the full pipeline.
     pub fn start(cfg: &Config<'_>) -> Result<Self, Error> {
+        cfg.validate()?;
         let mut pipeline = Pipeline {
             rtsp: std::ptr::null_mut(),
             capture: std::ptr::null_mut(),
@@ -325,7 +371,7 @@ impl Pipeline {
 
         // 8. Setup bundle: sources, tracks, muxer; apply and destroy.
         logging::log!("pipeline: 8 capture setup apply");
-        ffi::configure_capture(self.capture, &service_cfg, audio_src, video_src)?;
+        ffi::configure_capture(self.capture, &service_cfg, audio_src, video_src, cfg)?;
 
         // 8b. Recording sink. esp_capture_service's built-in muxer has no AVI
         //     support, so recording uses esp_muxer_service instead.
@@ -400,7 +446,7 @@ mod ffi {
     use core::ptr::{null, null_mut};
 
     /// Convert an `esp_err_t` into a step-named result.
-    fn check(code: i32, step: Step) -> Result<(), Error> {
+    pub(crate) fn check(code: i32, step: Step) -> Result<(), Error> {
         if code == sys::ESP_OK {
             Ok(())
         } else {
@@ -468,7 +514,7 @@ mod ffi {
         Ok(bus)
     }
 
-    fn i2c_config() -> sys::i2c_master_bus_config_t {
+    pub(crate) fn i2c_config() -> sys::i2c_master_bus_config_t {
         let mut config = sys::i2c_master_bus_config_t::default();
         config.i2c_port = 0;
         config.sda_io_num = SCCB_SDA_GPIO;
@@ -482,7 +528,7 @@ mod ffi {
         config
     }
 
-    fn pdm_config() -> sys::i2s_pdm_rx_config_t {
+    pub(crate) fn pdm_config() -> sys::i2s_pdm_rx_config_t {
         let mut clk = sys::i2s_pdm_rx_clk_config_t::default();
         clk.sample_rate_hz = 16_000;
         clk.clk_src = sys::soc_periph_i2s_clk_src_t_I2S_CLK_SRC_DEFAULT;
@@ -591,7 +637,7 @@ mod ffi {
         Ok(source)
     }
 
-    fn dvp_config() -> gmf::esp_capture_video_dvp_src_cfg_t {
+    pub(crate) fn dvp_config() -> gmf::esp_capture_video_dvp_src_cfg_t {
         gmf::esp_capture_video_dvp_src_cfg_t {
             // The implementation indexes a fixed `pic[2]` array: never exceed 2.
             buf_count: 2,
@@ -602,7 +648,7 @@ mod ffi {
             vsync_pin: 38,
             href_pin: 47,
             pclk_pin: 13,
-            xclk_freq: 20_000_000,
+            xclk_freq: 10_000_000,
             i2c_port: 0,
         }
     }
@@ -649,6 +695,7 @@ mod ffi {
         service_cfg: &gmf::esp_capture_service_cfg_t,
         audio_src: *mut gmf::esp_capture_audio_src_if_t,
         video_src: *mut gmf::esp_capture_video_src_if_t,
+        cfg: &Config<'_>,
     ) -> Result<(), Error> {
         let setup = unsafe { gmf::esp_capture_service_setup_create(service_cfg) };
         if setup.is_null() {
@@ -657,7 +704,7 @@ mod ffi {
             });
         }
 
-        let result = configure_setup(service, setup, audio_src, video_src);
+        let result = configure_setup(service, setup, audio_src, video_src, cfg);
         let destroy_code = unsafe { gmf::esp_capture_service_setup_destroy(setup) };
         result?;
         check(destroy_code, Step::CaptureSetupDestroy)
@@ -668,6 +715,7 @@ mod ffi {
         setup: *mut gmf::esp_capture_service_setup_t,
         audio_src: *mut gmf::esp_capture_audio_src_if_t,
         video_src: *mut gmf::esp_capture_video_src_if_t,
+        cfg: &Config<'_>,
     ) -> Result<(), Error> {
         let src_cfg = gmf::esp_capture_service_src_cfg_t {
             audio_src,
@@ -678,19 +726,7 @@ mod ffi {
         let code = unsafe { gmf::esp_capture_service_setup_src(setup, &src_cfg) };
         check(code, Step::CaptureSourceConfig)?;
 
-        let video_track = gmf::esp_media_track_info_t {
-            id: 1,
-            type_: gmf::esp_media_track_type_t_ESP_MEDIA_TRACK_TYPE_VIDEO,
-            info: gmf::esp_media_track_info_t__bindgen_ty_1 {
-                video: gmf::esp_media_video_info_t {
-                    codec: gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_MJPEG as u32,
-                    width: 320,
-                    height: 240,
-                    fps: 10,
-                    bitrate: 0,
-                },
-            },
-        };
+        let video_track = video_track_info(cfg);
         let code =
             unsafe { gmf::esp_capture_service_setup_add_track(setup, DEFAULT_STREAM, &video_track) };
         check(code, Step::CaptureTrackVideo)?;
@@ -1012,6 +1048,57 @@ mod tests {
     }
 
     #[test]
+    fn video_track_uses_the_configured_scale() {
+        let cfg = Config {
+            ipv4: None,
+            mount_point: "",
+            port: 554,
+            width: 640,
+            height: 480,
+            fps: 15,
+        };
+        let track = video_track_info(&cfg);
+        let video = unsafe { track.info.video };
+        assert_eq!(video.width, 640);
+        assert_eq!(video.height, 480);
+        assert_eq!(video.fps, 15);
+        assert_eq!(
+            video.codec,
+            gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_MJPEG as u32
+        );
+    }
+
+    #[test]
+    fn config_validation_rejects_bad_geometry() {
+        let base = |width, height, fps| Config {
+            ipv4: None,
+            mount_point: "",
+            port: 554,
+            width,
+            height,
+            fps,
+        };
+        assert!(base(320, 240, 10).validate().is_ok());
+        assert!(base(640, 480, 10).validate().is_ok());
+        assert!(matches!(
+            base(0, 240, 10).validate(),
+            Err(Error::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            base(321, 240, 10).validate(),
+            Err(Error::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            base(320, 240, 0).validate(),
+            Err(Error::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            base(320, 240, 31).validate(),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
     fn dvp_source_honours_the_hardware_constraints() {
         let cfg = ffi::dvp_config();
         assert_eq!(cfg.buf_count, 2, "implementation indexes a fixed pic[2] array");
@@ -1020,7 +1107,7 @@ mod tests {
         assert_eq!(cfg.href_pin, 47);
         assert_eq!(cfg.pclk_pin, 13);
         assert_eq!(cfg.data, [15, 17, 18, 16, 14, 12, 11, 48]);
-        assert_eq!(cfg.xclk_freq, 20_000_000);
+        assert_eq!(cfg.xclk_freq, 10_000_000);
         assert_eq!(cfg.i2c_port, 0);
         assert_eq!((cfg.pwr_pin, cfg.reset_pin), (-1, -1));
     }
@@ -1043,7 +1130,7 @@ mod tests {
             sys::i2s_pdm_data_fmt_t_I2S_PDM_DATA_FMT_PCM
         );
         assert_eq!(cfg.gpio_cfg.clk, MIC_CLK_GPIO);
-        assert_eq!(cfg.gpio_cfg.__bindgen_anon_1.din, MIC_DIN_GPIO);
+        assert_eq!(unsafe { cfg.gpio_cfg.__bindgen_anon_1.din }, MIC_DIN_GPIO);
     }
 
     #[test]

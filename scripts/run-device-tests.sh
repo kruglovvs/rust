@@ -53,7 +53,9 @@ ESP_ENV=(env -i HOME=/home/esp
   PATH=/home/esp/.cargo/bin:/usr/local/bin:/usr/bin:/bin
   RUSTUP_HOME=/home/esp/.rustup CARGO_HOME=/home/esp/.cargo
   IDF_PATH=/opt/esp/idf IDF_TOOLS_PATH=/opt/esp/idf-tools
-  RUSTUP_TOOLCHAIN=esp)
+  RUSTUP_TOOLCHAIN=esp
+  CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+  CARGO_WORKSPACE_DIR="$ROOT")
 
 # evaluate LOG EXPECTED REASON
 #   REASON is the monitor-loop termination cause: ok | timeout | idle | boot.
@@ -135,7 +137,7 @@ mkdir -p "$EVIDENCE"
 LOG="$EVIDENCE/serial.log"
 
 BUILD_JSON="$(mktemp)"
-if ! (cd "$FW" && "${ESP_ENV[@]}" cargo test --no-run --message-format=json >"$BUILD_JSON" 2>"$EVIDENCE/build.err"); then
+if ! (cd "$FW" && "${ESP_ENV[@]}" cargo test --no-run --workspace --message-format=json >"$BUILD_JSON" 2>"$EVIDENCE/build.err"); then
   echo "run-device-tests: cargo test --no-run failed (see $EVIDENCE/build.err)" >&2
   rm -f "$BUILD_JSON"; exit 6
 fi
@@ -175,15 +177,16 @@ for BIN in "${BINS[@]}"; do
     if [ $((NOW - LAST)) -ge "$IDLE_S" ]; then REASON=idle; break; fi
     if IFS= read -r -t 1 LINE <&3; then
       printf '%s\n' "$LINE" >> "$LOG"
-      if [[ "$LINE" == "test "* || "$LINE" == *"HEARTBEAT"* || "$LINE" == "test result: "* ]]; then
+      if [[ "$LINE" == "test "* || "$LINE" == *"HEARTBEAT"* ]]; then
         LAST=$(date +%s)
       fi
-      if [[ "$LINE" == *"Calling app_main()"* ]]; then
-        BOOTS=$(grep -c 'Calling app_main()' "$LOG")
-        if [ "$BOOTS" -gt "$EXPECTED" ]; then REASON=boot; break; fi
+      if [[ "$LINE" == "test result: "* ]]; then
+        LAST=$(date +%s)
+        REASON=done
+        break
       fi
     else
-      if ! kill -0 "$MON" 2>/dev/null; then REASON=ok; break; fi
+      if ! kill -0 "$MON" 2>/dev/null; then REASON=idle; break; fi
     fi
   done
   exec 3<&-
@@ -191,7 +194,7 @@ for BIN in "${BINS[@]}"; do
   pkill -P "$MON" 2>/dev/null
   wait "$MON" 2>/dev/null
   rm -f "$FIFO"
-  if [ "$REASON" != "ok" ]; then FINAL="$REASON"; break; fi
+  if [ "$REASON" != "done" ]; then FINAL="$REASON"; break; fi
 done
 
 evaluate "$LOG" "$EXPECTED" "$FINAL"

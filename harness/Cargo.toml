@@ -18,4 +18,9 @@ path = "tests/task14_net.rs"
 name = "e2e_rtsp"
 path = "tests/e2e_rtsp.rs"
 
+# Stream-quality analyser: dependency-free Rust over ffprobe/ffmpeg.
+[[bin]]
+name = "stream-analyze"
+path = "src/bin/stream-analyze.rs"
+
 [dependencies]

@@ -18,7 +18,9 @@
       "label": "ESP32-S3: Flash firmware over USB-JTAG",
       "type": "process",
       "command": "bash",
-      "args": ["${workspaceFolder}/scripts/flash-debug-jtag.sh"],
+      "args": [
+        "${workspaceFolder}/scripts/flash-debug-jtag.sh"
+      ],
       "options": {
         "env": {
           "IDF_PATH": "/opt/esp/idf",
@@ -29,6 +31,57 @@
       "problemMatcher": [],
       "dependsOn": "ESP32-S3: Build firmware",
       "dependsOrder": "sequence"
+    },
+    {
+      "label": "ESP32-S3: Run all on-device tests",
+      "type": "process",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/scripts/run-device-tests.sh",
+        "--timeout-seconds",
+        "300"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "ESP32-S3: Stream quality (60 s, 640x480)",
+      "type": "process",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/harness/stream_quality.sh",
+        "--seconds",
+        "60",
+        "--width",
+        "640",
+        "--height",
+        "480"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": "test"
+    },
+    {
+      "label": "ESP32-S3: Host harness tests",
+      "type": "process",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "cd '${workspaceFolder}/harness' && cargo test"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": "test"
     }
   ]
 }

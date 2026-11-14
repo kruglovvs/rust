@@ -106,6 +106,9 @@ pub fn run() -> ! {
         ipv4: ipv4.as_deref(),
         mount_point,
         port: RTSP_PORT,
+        width: VIDEO_WIDTH,
+        height: VIDEO_HEIGHT,
+        fps: VIDEO_FPS,
     };
     let pipeline = match media::Pipeline::start(&media_config) {
         Ok(pipeline) => Some(pipeline),
@@ -125,7 +128,10 @@ pub fn run() -> ! {
     let rtsp = pipeline.as_ref().is_some_and(|pipeline| pipeline.rtsp());
     logging::log!("boot: D rtsp={rtsp}");
 
-    logging::log!("boot: ready recording={recording} audio={audio} rtsp={rtsp}");
+    logging::log!(
+        "boot: ready recording={recording} audio={audio} rtsp={rtsp} \
+         capture={VIDEO_WIDTH}x{VIDEO_HEIGHT}@{VIDEO_FPS}fps"
+    );
 
     #[cfg(feature = "rtsp-selftest")]
     {

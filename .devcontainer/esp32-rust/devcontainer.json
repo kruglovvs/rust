@@ -50,7 +50,8 @@
                 "ms-vscode.cpptools",
                 "ms-vscode.cpptools-extension-pack",
                 "vadimcn.vscode-lldb",
-                "marus25.cortex-debug"
+                "marus25.cortex-debug",
+                "Zerotaskx.rust-extension-pack"
             ]
         }
     }
