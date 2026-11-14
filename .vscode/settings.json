@@ -1,0 +1,12 @@
+{
+  // Keep the firmware workspace (xtensa-esp32s3-espidf) and the host-only
+  // harness workspace analysable at the same time, so the Test Explorer shows
+  // both. Each workspace pins its own target in .cargo/config.toml (root =
+  // xtensa, harness = x86_64), so the global target override is cleared here;
+  // leaving it set forces the harness to cross-compile and its tests cannot run.
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml",
+    "harness/Cargo.toml"
+  ],
+  "rust-analyzer.cargo.target": null
+}
