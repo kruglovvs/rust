@@ -78,6 +78,8 @@ pub struct Config<'a> {
     pub height: u32,
     /// Requested frame rate in frames per second.
     pub fps: u32,
+    /// JPEG quality passed to the sensor, 0-63 (lower is better quality).
+    pub jpeg_quality: u32,
 }
 
 impl Config<'_> {
@@ -91,6 +93,9 @@ impl Config<'_> {
         }
         if self.fps == 0 || self.fps > 30 {
             return Err(Error::InvalidConfig("fps must be in 1..=30"));
+        }
+        if self.jpeg_quality > 63 {
+            return Err(Error::InvalidConfig("jpeg_quality must be in 0..=63"));
         }
         Ok(())
     }
@@ -374,7 +379,7 @@ impl Pipeline {
 
         // 5. DVP video source (OV3660, MJPEG).
         logging::log!("pipeline: 5 video source");
-        let video_src = ffi::video_source()?;
+        let video_src = ffi::video_source(cfg.jpeg_quality)?;
 
         // 6. Register the default muxer and encoders. esp_capture resolves
         //    them through a registry (esp_muxer_open, encoder lookups), so
@@ -659,7 +664,8 @@ mod ffi {
         Ok(source)
     }
 
-    pub(crate) fn dvp_config() -> gmf::esp_capture_video_dvp_src_cfg_t {
+    pub(crate) fn dvp_config(jpeg_quality: u32) -> gmf::esp_capture_video_dvp_src_cfg_t {
+        let _ = jpeg_quality;
         gmf::esp_capture_video_dvp_src_cfg_t {
             // The implementation indexes a fixed `pic[2]` array: never exceed 2.
             buf_count: 2,
@@ -675,8 +681,8 @@ mod ffi {
         }
     }
 
-    pub fn video_source() -> Result<*mut gmf::esp_capture_video_src_if_t, Error> {
-        let mut cfg = dvp_config();
+    pub fn video_source(jpeg_quality: u32) -> Result<*mut gmf::esp_capture_video_src_if_t, Error> {
+        let mut cfg = dvp_config(jpeg_quality);
         let source = unsafe { gmf::esp_capture_new_video_dvp_src(&mut cfg) };
         if source.is_null() {
             return Err(Error::Null {
@@ -1071,6 +1077,7 @@ mod tests {
             width: 640,
             height: 480,
             fps: 15,
+            jpeg_quality: 12,
         };
         let track = video_track_info(&cfg);
         let video = unsafe { track.info.video };
@@ -1106,6 +1113,7 @@ mod tests {
             width,
             height,
             fps,
+            jpeg_quality: 12,
         };
         assert!(base(320, 240, 10).validate().is_ok());
         assert!(base(640, 480, 10).validate().is_ok());
@@ -1128,8 +1136,28 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_quality_is_validated() {
+        let base = |jpeg_quality| Config {
+            ipv4: None,
+            mount_point: "",
+            port: 554,
+            width: 640,
+            height: 480,
+            fps: 10,
+            jpeg_quality,
+        };
+        assert!(base(0).validate().is_ok());
+        assert!(base(12).validate().is_ok());
+        assert!(base(63).validate().is_ok());
+        assert!(matches!(
+            base(64).validate(),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
     fn dvp_source_honours_the_hardware_constraints() {
-        let cfg = ffi::dvp_config();
+        let cfg = ffi::dvp_config(12);
         assert_eq!(cfg.buf_count, 2, "implementation indexes a fixed pic[2] array");
         assert_eq!(cfg.xclk_pin, 10);
         assert_eq!(cfg.vsync_pin, 38);

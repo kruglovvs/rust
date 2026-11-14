@@ -133,6 +133,13 @@ both workspaces via `rust-analyzer.linkedProjects`.
 | Stream quality | `./harness/stream_quality.sh` | host + board | record 60 s, artefact metrics |
 | Test Explorer | rust-analyzer | both | host tests instant; device tests flash per click |
 
+Long-running checks:
+
+```bash
+./harness/stress_test.sh --minutes 60     # 1 h, one file per minute, device log scan
+./harness/resolution_matrix.sh            # sizes x JPEG quality, measured
+```
+
 Recordings are kept for inspection: `stream_quality.sh` writes to
 `harness/artifacts/stream-quality/<timestamp>/`, and the integration tests to
 `harness/artifacts/<test>/` (`stream.mkv`, `video.mjpeg`, `audio.wav`,

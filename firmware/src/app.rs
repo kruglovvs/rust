@@ -6,7 +6,7 @@ use esp_idf_hal::peripherals::Peripherals;
 use net::{self, NetConfig, WifiCredentials};
 use storage::{self, Storage};
 
-include!(concat!(env!("OUT_DIR"), "/wifi_credentials.rs"));
+include!(concat!(env!("OUT_DIR"), "/build_settings.rs"));
 
 const RTSP_PORT: u16 = 554;
 
@@ -109,6 +109,7 @@ pub fn run() -> ! {
         width: VIDEO_WIDTH,
         height: VIDEO_HEIGHT,
         fps: VIDEO_FPS,
+        jpeg_quality: VIDEO_JPEG_QUALITY,
     };
     let pipeline = match media::Pipeline::start(&media_config) {
         Ok(pipeline) => Some(pipeline),
@@ -130,7 +131,7 @@ pub fn run() -> ! {
 
     logging::log!(
         "boot: ready recording={recording} audio={audio} rtsp={rtsp} \
-         capture={VIDEO_WIDTH}x{VIDEO_HEIGHT}@{VIDEO_FPS}fps"
+         capture={VIDEO_WIDTH}x{VIDEO_HEIGHT}@{VIDEO_FPS}fps q={VIDEO_JPEG_QUALITY}"
     );
 
     #[cfg(feature = "rtsp-selftest")]

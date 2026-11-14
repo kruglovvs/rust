@@ -38,4 +38,8 @@ rtsp-selftest = []
 esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
 
 [profile.release]
-opt-level = "z"
+# Speed over size: the pipeline is JPEG/resample-bound, and the debug build
+# (opt-level 0) was what every measurement used before.
+opt-level = 3
+lto = "thin"
+codegen-units = 1

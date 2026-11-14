@@ -24,6 +24,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=../.env");
     write_wifi_credentials();
+    let jpeg_quality = read_knob("VIDEO_JPEG_QUALITY", 12).min(63);
     patch_fatfs_exfat();
 
     // ESP-IDF 5.5.2 `sdmmc_card_init` always issues the SDIO CMD5 probe
@@ -46,6 +47,7 @@ fn main() {
             let args = shlex_split(&value);
             patch_esp32_camera_eoi_scan(&args);
             patch_esp32_camera_soi_dump(&args);
+            patch_esp_capture_jpeg_quality(&args, &jpeg_quality);
             for arg in args {
                 // One directive per argument: each value is a single argv item.
                 println!("cargo::rustc-link-arg={arg}");
@@ -107,7 +109,7 @@ fn patch_esp32_camera_eoi_scan(link_args: &[String]) {
         return;
     }
 
-    match run_camera_ninja(link_args, &build_dir) {
+    match run_component_ninja(link_args, &build_dir, "esp-idf/espressif__esp32-camera/libespressif__esp32-camera.a") {
         Ok(status) if status.success() => println!(
             "cargo:warning=firmware build.rs: patched esp32-camera EOI scan to search the full frame buffer"
         ),
@@ -176,7 +178,7 @@ fn patch_esp32_camera_soi_dump(link_args: &[String]) {
         return;
     }
 
-    match run_camera_ninja(link_args, &build_dir) {
+    match run_component_ninja(link_args, &build_dir, "esp-idf/espressif__esp32-camera/libespressif__esp32-camera.a") {
         Ok(status) if status.success() => println!(
             "cargo:warning=firmware build.rs: patched esp32-camera SOI dump"
         ),
@@ -191,11 +193,97 @@ fn patch_esp32_camera_soi_dump(link_args: &[String]) {
     }
 }
 
+/// Read a numeric knob: environment first, then `.env`, then the default.
+fn read_knob(key: &str, default: u32) -> u32 {
+    println!("cargo:rerun-if-env-changed={key}");
+    let from_env = env::var(key).ok().and_then(|value| value.parse::<u32>().ok());
+    if let Some(value) = from_env {
+        return value;
+    }
+    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let env_path = Path::new(&manifest_dir).join("../.env");
+    fs::read_to_string(env_path)
+        .ok()
+        .and_then(|contents| parse_settings(&contents).get(key).copied())
+        .unwrap_or(default)
+}
+
+/// Replace esp_capture's hard-coded JPEG quality with the configured value.
+///
+/// The DVP source builds `camera_config_t` inline with `.jpeg_quality = 12`,
+/// which is a very high quality (and therefore large) JPEG. The knob lets a
+/// build trade size for bandwidth without touching the component.
+fn patch_esp_capture_jpeg_quality(link_args: &[String], quality: &u32) {
+    let Some(cwd_index) = link_args.iter().position(|arg| arg == "--ldproxy-cwd") else {
+        return;
+    };
+    let Some(build_dir) = link_args.get(cwd_index + 1).map(PathBuf::from) else {
+        return;
+    };
+    let src = build_dir.join(
+        "../managed_components/espressif__esp_capture/impl/capture_video_src/capture_video_dvp_src.c",
+    );
+    let Ok(contents) = fs::read_to_string(&src) else {
+        println!(
+            "cargo:warning=firmware build.rs: could not read {}; jpeg quality left at its default",
+            src.display()
+        );
+        return;
+    };
+    let current = contents
+        .lines()
+        .find(|line| line.trim_start().starts_with(".jpeg_quality = "))
+        .and_then(|line| line.split('=').nth(1))
+        .and_then(|value| value.trim().trim_end_matches(',').parse::<u32>().ok());
+    if current == Some(*quality) {
+        return;
+    }
+    let patched: String = contents
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with(".jpeg_quality = ") {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                format!("{indent}.jpeg_quality = {quality},")
+            } else {
+                line.to_string()
+            }
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if patched == contents {
+        return;
+    }
+    if let Err(error) = fs::write(&src, patched + "\n") {
+        println!(
+            "cargo:warning=firmware build.rs: could not write {} ({error}); jpeg quality unchanged",
+            src.display()
+        );
+        return;
+    }
+    match run_component_ninja(
+        link_args,
+        &build_dir,
+        "esp-idf/espressif__esp_capture/libespressif__esp_capture.a",
+    ) {
+        Ok(status) if status.success() => {
+            println!("cargo:warning=firmware build.rs: patched esp_capture jpeg quality to {quality}")
+        }
+        Ok(status) => println!(
+            "cargo:warning=firmware build.rs: esp_capture rebuild failed ({status}); jpeg quality may be stale"
+        ),
+        Err(error) => println!(
+            "cargo:warning=firmware build.rs: could not run ninja ({error}); jpeg quality may be stale"
+        ),
+    }
+}
+
 /// Rebuild the esp32-camera component archive with the component's own ninja
 /// rule so the Rust link in the same build picks up the patched sources.
-fn run_camera_ninja(
+fn run_component_ninja(
     link_args: &[String],
     build_dir: &Path,
+    target: &str,
 ) -> std::io::Result<std::process::ExitStatus> {
     let mut path = env::var_os("PATH").unwrap_or_default();
     if let Some(linker_dir) = link_args
@@ -212,7 +300,7 @@ fn run_camera_ninja(
     Command::new("ninja")
         .arg("-C")
         .arg(build_dir)
-        .arg("esp-idf/espressif__esp32-camera/libespressif__esp32-camera.a")
+        .arg(target)
         .env("PATH", path)
         .status()
 }
@@ -408,30 +496,61 @@ fn shlex_split(input: &str) -> Vec<String> {
 fn write_wifi_credentials() {
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap();
     let env_path = Path::new(&manifest_dir).join("../.env");
-    let values = fs::read_to_string(env_path)
-        .ok()
-        .map(|contents| parse_wifi_credentials(&contents));
-    let (ssid, password) = values.unwrap_or_default();
-    let video_value = |key: &str, default: u32| {
+    let contents = fs::read_to_string(&env_path).unwrap_or_default();
+    println!("cargo:rerun-if-changed={}", env_path.display());
+    let (ssid, password) = parse_wifi_credentials(&contents);
+    let settings = parse_settings(&contents);
+
+    // A process environment variable wins over .env so a one-off build can
+    // override the committed defaults without editing the file.
+    let knob = |key: &str, default: u32| {
         println!("cargo:rerun-if-env-changed={key}");
         env::var(key)
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
+            .or_else(|| settings.get(key).copied())
             .filter(|value| *value > 0)
             .unwrap_or(default)
     };
-    let width = video_value("VIDEO_WIDTH", 640);
-    let height = video_value("VIDEO_HEIGHT", 480);
-    let fps = video_value("VIDEO_FPS", 10);
+    let width = knob("VIDEO_WIDTH", 640);
+    let height = knob("VIDEO_HEIGHT", 480);
+    let fps = knob("VIDEO_FPS", 10);
+    let jpeg_quality = knob("VIDEO_JPEG_QUALITY", 12).min(63);
+    let audio_bitrate = knob("AUDIO_BITRATE", 64_000);
+    let audio_rate = knob("AUDIO_SAMPLE_RATE", 48_000);
+
     let generated = format!(
-        "pub const WIFI_SSID: Option<&str> = {}\n;pub const WIFI_PASSWORD: Option<&str> = {};\
-         \npub const VIDEO_WIDTH: u32 = {width};\npub const VIDEO_HEIGHT: u32 = {height};\
-         \npub const VIDEO_FPS: u32 = {fps};\n",
+        "pub const WIFI_SSID: Option<&str> = {}\n;\
+         pub const WIFI_PASSWORD: Option<&str> = {};\n\
+         pub const VIDEO_WIDTH: u32 = {width};\n\
+         pub const VIDEO_HEIGHT: u32 = {height};\n\
+         pub const VIDEO_FPS: u32 = {fps};\n\
+         pub const VIDEO_JPEG_QUALITY: u32 = {jpeg_quality};\n\
+         pub const AUDIO_BITRATE: u32 = {audio_bitrate};\n\
+         pub const AUDIO_SAMPLE_RATE: u32 = {audio_rate};\n",
         rust_option(ssid.as_deref()),
         rust_option(password.as_deref())
     );
     let out_dir = env::var_os("OUT_DIR").unwrap();
-    fs::write(Path::new(&out_dir).join("wifi_credentials.rs"), generated).unwrap();
+    fs::write(Path::new(&out_dir).join("build_settings.rs"), generated).unwrap();
+}
+
+/// Parse `KEY=value` lines into numeric settings, ignoring the Wi-Fi keys and
+/// anything that does not parse as an unsigned integer.
+fn parse_settings(contents: &str) -> std::collections::HashMap<String, u32> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .filter_map(|(key, value)| {
+            value
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .map(|value| (key.trim().to_string(), value))
+        })
+        .collect()
 }
 
 fn parse_wifi_credentials(contents: &str) -> (Option<String>, Option<String>) {

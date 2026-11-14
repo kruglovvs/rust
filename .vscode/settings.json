@@ -3,13 +3,16 @@
     "firmware/Cargo.toml",
     "harness/Cargo.toml"
   ],
-  "rust-analyzer.cargo.target": null,
+  "rust-analyzer.cargo.allTargets": true,
+  "rust-analyzer.cargo.features": "all",
+  "rust-analyzer.testExplorer": true,
   "cmake.sourceDirectory": "/workspaces/rust/firmware/gmf-deps",
   "rust-analyzer.cargo.extraEnv": {
     "RUSTUP_HOME": "/home/esp/.rustup",
     "CARGO_HOME": "/home/esp/.cargo",
     "IDF_PATH": "/opt/esp/idf",
     "IDF_TOOLS_PATH": "/opt/esp/idf-tools",
-    "IDF_TARGET": "esp32s3"
+    "IDF_TARGET": "esp32s3",
+    "LIBCLANG_PATH": "/home/esp/.espup/esp-clang"
   }
 }
