@@ -21,6 +21,8 @@ WAIT_S=120
 WIDTH=640
 HEIGHT=480
 MIN_FRAMES=150
+AUDIO_CODEC=aac
+AUDIO_RATE=48000
 FLASH=1
 OUT="${STREAM_QUALITY_OUT:-$ROOT/harness/artifacts/stream-quality/$(date -u +%Y%m%dT%H%M%SZ)}"
 
@@ -33,6 +35,8 @@ while [ $# -gt 0 ]; do
     --width) WIDTH="${2:?}"; shift 2 ;;
     --height) HEIGHT="${2:?}"; shift 2 ;;
     --min-frames) MIN_FRAMES="${2:?}"; shift 2 ;;
+    --audio-codec) AUDIO_CODEC="${2:?}"; shift 2 ;;
+    --audio-rate) AUDIO_RATE="${2:?}"; shift 2 ;;
     --no-flash) FLASH=0; shift ;;
     --out) OUT="${2:?}"; shift 2 ;;
     -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
@@ -40,7 +44,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case "$RECORD_S$WAIT_S$WIDTH$HEIGHT$MIN_FRAMES" in
+case "$RECORD_S$WAIT_S$WIDTH$HEIGHT$MIN_FRAMES$AUDIO_RATE" in
   ''|*[!0-9]*) echo "seconds and wait must be integers" >&2; exit 3 ;;
 esac
 
@@ -98,4 +102,5 @@ ffmpeg -hide_banner -loglevel error -nostdin -i "$OUT/stream.mkv" \
 
 echo "[4/4] analyzing (expect ${WIDTH}x${HEIGHT})"
 (cd "$HERE" && cargo run --quiet --bin stream-analyze -- report "$OUT" \
-  --width "$WIDTH" --height "$HEIGHT" --min-frames "$MIN_FRAMES")
+  --width "$WIDTH" --height "$HEIGHT" --min-frames "$MIN_FRAMES" \
+  --audio-codec "$AUDIO_CODEC" --audio-rate "$AUDIO_RATE")

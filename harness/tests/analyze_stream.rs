@@ -22,14 +22,23 @@ fn run(cmd: &mut Command) {
     assert!(status.success(), "{cmd:?} failed");
 }
 
+/// Recordings live in `harness/artifacts/` (gitignored) so a failed run can
+/// be inspected with ffprobe/ffplay after the fact.
+fn artifacts(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("artifacts")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create artifacts dir");
+    dir
+}
+
 /// Build `<dir>/stream.mkv` plus `video.mjpeg` / `audio.wav`.
 ///
 /// `audio` is a full lavfi source spec (it may carry its own duration);
 /// `seconds` bounds the video track.
 fn build_clip(name: &str, audio: &str, seconds: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create test dir");
+    let dir = artifacts(name);
 
     run(Command::new("ffmpeg").args([
         "-hide_banner", "-loglevel", "error",
@@ -58,6 +67,8 @@ fn options() -> Options {
         height: 240,
         min_frames: 400,
         min_duration: 55.0,
+        audio_codec: "pcm_mulaw".to_string(),
+        audio_rate: 8_000,
     }
 }
 

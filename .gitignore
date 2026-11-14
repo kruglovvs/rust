@@ -2,6 +2,9 @@
 target/
 .embuild/
 
+# Harness recordings (stream_quality.sh and the integration tests)
+harness/artifacts/
+
 # Backup files
 *.bak.*
 

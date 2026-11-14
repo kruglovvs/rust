@@ -2,6 +2,7 @@
 //!
 //! Usage: stream-analyze report OUTDIR [--width N] [--height N]
 //!                                  [--min-frames N] [--min-duration S]
+//!                                  [--audio-codec NAME] [--audio-rate HZ]
 
 use std::path::PathBuf;
 
@@ -28,6 +29,8 @@ fn main() {
             "--height" => options.height = value.parse().unwrap_or(options.height),
             "--min-frames" => options.min_frames = value.parse().unwrap_or(options.min_frames),
             "--min-duration" => options.min_duration = value.parse().unwrap_or(options.min_duration),
+            "--audio-codec" => options.audio_codec = value,
+            "--audio-rate" => options.audio_rate = value.parse().unwrap_or(options.audio_rate),
             other => {
                 eprintln!("unknown flag {other}");
                 std::process::exit(2);

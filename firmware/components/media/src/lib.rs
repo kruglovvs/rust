@@ -53,10 +53,11 @@ const MIC_DIN_GPIO: i32 = 41;
 const SCCB_SDA_GPIO: i32 = 40;
 /// Camera SCCB SCL pin.
 const SCCB_SCL_GPIO: i32 = 39;
-/// G.711 µ-law sample rate. RTP payload type 0 is fixed at 8000 Hz by
-/// RFC 3551, so the track and the payload clock must agree; a 16 kHz track
-/// makes every client play the stream at half speed.
-const AUDIO_SAMPLE_RATE_HZ: u32 = 8_000;
+/// Audio sample rate. AAC is used instead of G.711 so the mic can run at a
+/// wideband rate (G.711 is fixed at 8 kHz / 64 kb/s by RFC 3551).
+const AUDIO_SAMPLE_RATE_HZ: u32 = 48_000;
+/// AAC-LC mono bitrate.
+const AUDIO_BITRATE_BPS: u32 = 64_000;
 /// AVI muxer aligned internal-RAM write cache (16 KiB, as recommended).
 const MUXER_RAM_CACHE: u32 = 16 * 1024;
 
@@ -248,18 +249,18 @@ fn video_track_info(cfg: &Config<'_>) -> gmf::esp_media_track_info_t {
     }
 }
 
-/// Build the G.711 µ-law track description.
+/// Build the AAC track description.
 fn audio_track_info() -> gmf::esp_media_track_info_t {
     gmf::esp_media_track_info_t {
         id: 2,
         type_: gmf::esp_media_track_type_t_ESP_MEDIA_TRACK_TYPE_AUDIO,
         info: gmf::esp_media_track_info_t__bindgen_ty_1 {
             audio: gmf::esp_media_audio_info_t {
-                codec: gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_G711U as u32,
+                codec: gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_AAC as u32,
                 sample_rate: AUDIO_SAMPLE_RATE_HZ,
                 bits_per_sample: 16,
                 channel: 1,
-                bitrate: 64_000,
+                bitrate: AUDIO_BITRATE_BPS,
             },
         },
     }
@@ -1083,16 +1084,15 @@ mod tests {
     }
 
     #[test]
-    fn audio_track_matches_the_static_g711_clock() {
+    fn audio_track_is_wideband_aac() {
         let track = audio_track_info();
         let audio = unsafe { track.info.audio };
         assert_eq!(
             audio.codec,
-            gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_G711U as u32
+            gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_AAC as u32
         );
-        // PT 0 is PCMU/8000 in RFC 3551; a different rate doubles the
-        // playback duration on every client.
-        assert_eq!(audio.sample_rate, 8_000);
+        // Wideband: G.711 would pin this to 8000 Hz.
+        assert_eq!(audio.sample_rate, 48_000);
         assert_eq!(audio.channel, 1);
         assert_eq!(audio.bits_per_sample, 16);
     }

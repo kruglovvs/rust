@@ -9,7 +9,7 @@ optional SD recording. The board is the server; a client pulls
 | Layer | Choice |
 |---|---|
 | SoC | ESP32-S3R8, 8 MiB octal PSRAM, 8 MiB flash, OV3660 DVP camera, PDM mic |
-| Media | Espressif **ADF / GMF**: `esp_capture_service`, `esp_rtsp_service` (one stream, MJPEG + PCMU), optional `esp_muxer_service` (AVI) |
+| Media | Espressif **ADF / GMF**: `esp_capture_service`, `esp_rtsp_service` (one stream, MJPEG + AAC), optional `esp_muxer_service` (AVI) |
 | Language | **Rust** (`std`, ESP-IDF target `xtensa-esp32s3-espidf`) |
 | Bindings | `esp-idf-sys` bindgen over the C headers; **no C or C++ shim** |
 | FS | FatFs exFAT (patched at build time), `f_mkfs` for on-device format |
@@ -72,11 +72,19 @@ sync cannot sustain it, so VGA is the default. The DVP clock is 10 MHz; at
 
 ### Audio
 
-G.711 µ-law, 8000 Hz mono, RTP payload type 0. RFC 3551 fixes PT 0 at 8 kHz,
-so the track must advertise 8000 Hz; a 16 kHz track made every client play the
-stream at half speed (a 10 s capture became 20 s of audio). The mic runs at
-16 kHz and is resampled by the capture path. `audio_track_matches_the_static_g711_clock`
-in `components/media` guards the rate.
+AAC-LC, **48 kHz mono, 64 kb/s**, RTP payload type 97:
+
+```
+m=audio 0 RTP/AVP 97
+a=rtpmap:97 MPEG4-GENERIC/48000/1
+a=fmtp:97 mode=AAC-hbr; indexlength=3; sizelength=13; config=1188; streamtype=5
+```
+
+G.711 was the first choice but PT 0 pins the clock at 8 kHz by RFC 3551, and
+8-bit companding was audible as hiss at the mic's low level. The RTSP service
+maps only G.711 and AAC (Opus has no server-side mapping), so AAC is the only
+wideband option. `audio_track_is_wideband_aac` in `components/media` guards the
+codec/rate.
 
 ## Harness Architecture
 
@@ -125,6 +133,11 @@ both workspaces via `rust-analyzer.linkedProjects`.
 | Stream quality | `./harness/stream_quality.sh` | host + board | record 60 s, artefact metrics |
 | Test Explorer | rust-analyzer | both | host tests instant; device tests flash per click |
 
+Recordings are kept for inspection: `stream_quality.sh` writes to
+`harness/artifacts/stream-quality/<timestamp>/`, and the integration tests to
+`harness/artifacts/<test>/` (`stream.mkv`, `video.mjpeg`, `audio.wav`,
+`metrics.json`). The directory is gitignored.
+
 Device tests are also runnable from the Test Explorer: the cargo runner
 (`scripts/device-test-runner.sh`) flashes the test binary, streams libtest
 output and exits with the device result. The device runs every test in a
@@ -161,5 +174,6 @@ other secret there.
 - Sizes above 640×480 configure successfully but the capture pipeline stalls
   (see the geometry table), so they are not usable for a live stream yet.
 - The PDM path has no codec chip, so `esp_codec_dev` gain control is a no-op;
-  the mic level is what the sensor delivers (peaks around −17 dBFS).
+  the mic level is what the sensor delivers (peaks around −17 dBFS), which is
+  why the harness reports the audio as "quiet" but not silent.
 - Device tests, flashing and the live capture require the board attached.

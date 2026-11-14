@@ -46,9 +46,15 @@ fn live_stream_matches_the_configured_geometry() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(480);
 
-    let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("stream-capture");
-    let _ = std::fs::remove_dir_all(&out);
-    std::fs::create_dir_all(&out).expect("create test dir");
+    // Kept in harness/artifacts/ (gitignored) for post-run inspection.
+    let out = {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("artifacts")
+            .join("stream-capture");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create artifacts dir");
+        dir
+    };
 
     let record = Command::new("ffmpeg")
         .args(["-hide_banner", "-nostdin", "-rtsp_transport", "tcp", "-i", &url,
@@ -73,13 +79,25 @@ fn live_stream_matches_the_configured_geometry() {
         assert!(status.success(), "failed to extract {file}");
     }
 
-    let options = Options { width, height, min_frames: 10, min_duration: 5.0 };
+    let audio_codec = std::env::var("STREAM_AUDIO_CODEC").unwrap_or_else(|_| "aac".into());
+    let audio_rate: u64 = std::env::var("STREAM_AUDIO_RATE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(48_000);
+    let options = Options {
+        width,
+        height,
+        min_frames: 10,
+        min_duration: 5.0,
+        audio_codec: audio_codec.clone(),
+        audio_rate,
+    };
     let _outcome = report(&out, &options).expect("analysis");
 
     let metrics = std::fs::read_to_string(out.join("metrics.json"))
         .expect("analyser must produce metrics.json");
     assert!(metrics.contains("\"codec\": \"mjpeg\""), "video codec");
-    assert!(metrics.contains("\"codec\": \"pcm_mulaw\""), "audio codec");
+    assert!(metrics.contains(&format!("\"codec\": \"{audio_codec}\"")), "audio codec");
     assert!(metrics.contains(&format!("\"width\": {width}")), "video width should be {width}");
     assert!(metrics.contains(&format!("\"height\": {height}")), "video height should be {height}");
     assert!(metrics.contains("\"frames\": "), "frame count missing");

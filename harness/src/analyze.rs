@@ -23,6 +23,10 @@ pub struct Options {
     pub height: u32,
     pub min_frames: u64,
     pub min_duration: f64,
+    /// Expected audio codec name as reported by ffprobe (`aac`, `pcm_mulaw`, ...).
+    pub audio_codec: String,
+    /// Expected audio sample rate in Hz.
+    pub audio_rate: u64,
 }
 
 impl Default for Options {
@@ -32,6 +36,8 @@ impl Default for Options {
             height: 480,
             min_frames: 150,
             min_duration: 55.0,
+            audio_codec: "aac".to_string(),
+            audio_rate: 48_000,
         }
     }
 }
@@ -518,12 +524,21 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
     );
     match &audio {
         Some(audio) => {
-            check("audio codec pcm_mulaw".into(), field(audio, "codec_name") == Some("pcm_mulaw"),
-                field(audio, "codec_name").unwrap_or("?").to_string());
-            check("audio 8000 Hz mono".into(),
-                integer(audio, "sample_rate") == Some(8000) && integer(audio, "channels") == Some(1),
-                format!("{} Hz, {} ch", field(audio, "sample_rate").unwrap_or("?"),
-                        field(audio, "channels").unwrap_or("?")));
+            check(
+                format!("audio codec {}", opts.audio_codec),
+                field(audio, "codec_name") == Some(opts.audio_codec.as_str()),
+                field(audio, "codec_name").unwrap_or("?").to_string(),
+            );
+            check(
+                format!("audio {} Hz mono", opts.audio_rate),
+                integer(audio, "sample_rate") == Some(opts.audio_rate)
+                    && integer(audio, "channels") == Some(1),
+                format!(
+                    "{} Hz, {} ch",
+                    field(audio, "sample_rate").unwrap_or("?"),
+                    field(audio, "channels").unwrap_or("?")
+                ),
+            );
         }
         None => check("audio stream present".into(), false, "missing".into()),
     }
