@@ -1,2 +1,8 @@
+# The harness builds for the host, but this image only ships the custom `esp`
+# toolchain (rustc 1.93 nightly), which also bundles the x86_64 host std.
+# Pinning 1.89 here made rustup look for a toolchain that is not installed:
+#   error: toolchain '1.89-x86_64-unknown-linux-gnu' is not installed
+# Keep this identical to the workspace root so rust-analyzer and cargo resolve
+# the same toolchain for both projects.
 [toolchain]
-channel = "1.89"
+channel = "esp"
