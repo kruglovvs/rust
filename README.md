@@ -62,6 +62,15 @@ Equivalent direct commands:
 
 The harness uses its own pinned toolchain.
 
+Flashing must include the partition table, otherwise the board keeps the
+image already in flash (the IDF default 8 MB single-app layout) and
+`firmware/partitions.csv` never takes effect:
+
+```bash
+./scripts/flash.sh              # builds, then flashes elf + partition table to /dev/ttyACM0
+./scripts/flash.sh /dev/ttyUSB0 # or pass a port
+```
+
 ## Wi-Fi Credentials
 
 `WIFI_SSID` and `WIFI_PASSWORD` live in `.env` at the repository root and are
