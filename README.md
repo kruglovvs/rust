@@ -1,134 +1,137 @@
-# ESP32-S3 A/V Firmware
+# ESP32-S3 A/V Streamer
 
-This repository contains an ESP32-S3 firmware package and a separate host
-harness for an MJPEG plus PCMU RTSP server with optional AVI recording to SD.
-The board is the RTSP server. A client connects to the board's private LAN IP.
+XIAO ESP32-S3 Sense as a LAN RTSP server: MJPEG video + G.711 µ-law audio, plus
+optional SD recording. The board is the server; a client pulls
+`rtsp://<board-ip>:554/live`.
 
-## Current State
+## Stack
 
-The firmware is built on Espressif's ADF/GMF media services, called from Rust
-through bindings generated directly from the C headers (`bindings-gmf.h` →
-`esp_idf_sys::gmf`). There is no hand-written C or C++ shim, and no
-hand-written RTSP, RTP, JPEG, camera, microphone or muxer code.
+| Layer | Choice |
+|---|---|
+| SoC | ESP32-S3R8, 8 MiB octal PSRAM, 8 MiB flash, OV3660 DVP camera, PDM mic |
+| Media | Espressif **ADF / GMF**: `esp_capture_service`, `esp_rtsp_service` (one stream, MJPEG + PCMU), optional `esp_muxer_service` (AVI) |
+| Language | **Rust** (`std`, ESP-IDF target `xtensa-esp32s3-espidf`) |
+| Bindings | `esp-idf-sys` bindgen over the C headers; **no C or C++ shim** |
+| FS | FatFs exFAT (patched at build time), `f_mkfs` for on-device format |
+
+## Layout
 
 ```
-esp_capture_service (DVP OV3660 -> MJPEG, PDM mic -> G711U)
-    -> esp_media_service_link -> esp_rtsp_service (ROLE_SERVER)
-    -> rtsp://<board-ip>:554/live
-
-    (feature `avi-recording`, off by default)
-    -> esp_media_service_link -> esp_muxer_service -> /sdcard/rec/*.avi
+firmware/   own cargo workspace: xtensa target, ESP-IDF, components/*, sdkconfig
+harness/    own cargo workspace: host x86_64, stream capture + analysis
+scripts/    build / flash / device-test entry points
+docs:       firmware/docs/architecture.md, failure-modes.md
 ```
 
-`firmware/src/main.rs` is 24 lines; `firmware/src/app.rs` brings up netif,
-storage and Wi-Fi, waits for a station address, then starts `media::Pipeline`
-and idles. Reusable Rust libraries live in `firmware/components/{logging,net,storage,media}`.
+Each workspace pins its own `.cargo/config.toml` and `rust-toolchain.toml`, so
+host tests never inherit the ESP target.
 
-Verified on hardware: `OPTIONS` returns `200 OK`, `DESCRIBE` returns an SDP
-with `JPEG/90000` and `PCMU/8000`, and 60 s captures at **640x480** deliver
-444-571 video frames (7.4-9.5 fps) with **zero corrupt frames** after the
-sensor clock was reduced to 10 MHz. At 20 MHz the same sensor produced
-74% corrupt JPEGs (decoder `bad vlc`/`error dc`) - the green/coloured bands
-seen on screen. The on-device self-check reports PASS.
+## Firmware Architecture
 
-The 257 GB SD card is formatted and mounts as exFAT: `f_mkfs` (FM_EXFAT |
-FM_SFD) is called directly on the registered diskio drive because
-`Fatfs::format` never returns on this board. Mount succeeds, a 4 MiB
-round-trip is byte-identical, and the write rate is 415-419 kB/s.
+`main.rs` (24 lines) starts `app.rs`, which brings up the platform and hands
+control to the media pipeline:
 
-Capture geometry is a build-time choice (defaults 640x480 @ 10 fps):
+```mermaid
+flowchart TD
+    M["main.rs"] --> A["app.rs"]
+    A --> N["net (Wi-Fi STA)"]
+    N --> S["storage (SD / exFAT)"]
+    S --> P["media::Pipeline"]
+```
+
+`media::Pipeline` links Espressif services; frames never pass through Rust:
+
+```mermaid
+flowchart LR
+    CAM["OV3660 DVP<br/>MJPEG"] --> CAP["esp_capture_service"]
+    MIC["PDM mic<br/>PCM to G711U"] --> CAP
+    CAP -->|"esp_media_service_link"| RTSP["esp_rtsp_service<br/>ROLE_SERVER"]
+    RTSP --> C["rtsp://ip:554/live"]
+    CAP -.->|"feature avi-recording"| MUX["esp_muxer_service"]
+    MUX -.-> SD[("/sdcard/rec/*.avi")]
+```
+
+Reusable Rust crates: `firmware/components/{logging,net,storage,media}`.
+Capture geometry is build-time: `VIDEO_WIDTH`, `VIDEO_HEIGHT`, `VIDEO_FPS`
+(defaults 640×480 @ 10). The DVP clock is 10 MHz — at 20 MHz the sensor emits
+~74% corrupt VGA JPEGs (green/coloured bands).
+
+## Harness Architecture
+
+Host-side tooling that drives the real board and measures the result:
+
+```mermaid
+flowchart LR
+    Q["stream_quality.sh"] --> F["flash.sh<br/>ELF + partition table"]
+    F --> B[("board")]
+    Q --> W["wait for TCP 554<br/>up to 120 s"]
+    W --> R["ffmpeg record 60 s<br/>-c copy"]
+    R --> AN["stream-analyze (Rust)<br/>bitrate, scale, JPEG integrity,<br/>blur/block, freeze/black"]
+    AN --> J["metrics.json<br/>PASS / FAIL"]
+```
+
+Host tests (`harness/`) exercise the same analysis code plus a live RTSP client:
+
+```mermaid
+flowchart LR
+    T1["analyze_stream<br/>synthetic clip"] --> L["harness/src/analyze.rs"]
+    T2["stream_capture<br/>opt-in live"] --> L
+    T3["e2e_rtsp<br/>client + SDP"] --> L
+    T4["task14_net<br/>pure policy"] --> L
+```
+
+## Devcontainer
+
+Image `espressif/idf-rust:esp32s3_latest` plus a containerfile that installs
+ESP-IDF v5.5.2 (`/opt/esp/idf`, tools in `/opt/esp/idf-tools`), ffmpeg and
+serial diagnostics. Environment (set in `containerEnv`):
+`IDF_PATH`, `IDF_TOOLS_PATH`, `RUSTUP_HOME=/home/esp/.rustup`,
+`CARGO_HOME=/home/esp/.cargo`. `/dev` is bind-mounted so `ttyACM*` appears
+without restarting the container.
+
+After changing `containerfile`/`devcontainer.json`: **Dev Containers: Rebuild
+Container** (the first build clones IDF, so it is slow). rust-analyzer analyses
+both workspaces via `rust-analyzer.linkedProjects`.
+
+## Test Runners
+
+| Runner | Command | Runs on | Covers |
+|---|---|---|---|
+| Host tests | `./scripts/test-harness.sh` | host | analyzer, RTSP client, net policy |
+| Device unit tests | `./scripts/run-device-tests.sh` | board (serial) | 54 tests in 5 binaries |
+| Stream quality | `./harness/stream_quality.sh` | host + board | record 60 s, artefact metrics |
+| Test Explorer | rust-analyzer | both | host tests instant; device tests flash per click |
+
+Device tests are also runnable from the Test Explorer: the cargo runner
+(`scripts/device-test-runner.sh`) flashes the test binary, streams libtest
+output and exits with the device result. The device runs every test in a
+binary (filters do not reach `app_main`), and a click costs one flash (~40 s).
+
+## Build, Flash, Connect
 
 ```bash
-VIDEO_WIDTH=320 VIDEO_HEIGHT=240 VIDEO_FPS=10 ./scripts/build-firmware.sh
+./scripts/build-firmware.sh          # VIDEO_WIDTH=320 VIDEO_HEIGHT=240 ...
+./scripts/flash.sh [PORT]            # flashes ELF + partition table
+./harness/stream_quality.sh          # flash, wait, record 60 s, analyse
+ffplay -rtsp_transport tcp rtsp://<board-ip>:554/live
 ```
 
-The sensor clock is 10 MHz (`dvp_config`). At 20 MHz the OV3660's DVP output
-corrupts most VGA frames; 10 MHz is what makes the stream clean.
+The serial log prints the address: `boot: RTSP advertising <ip>:554`, followed
+by `boot: ready recording=… audio=… rtsp=…` and `selftest: PASS`.
 
-Known limitation:
+Flashing must include the partition table; `espflash flash <elf>` alone keeps
+the previous layout in flash.
 
-- AVI recording is gated behind `avi-recording` and off by default. Enabling
-  it links `esp_muxer_service` (the only AVI-capable muxer; the capture
-  service has no AVI support), but that sink requests the provider's global
-  cache, which starves the RTSP video sink and still leaves `muxed_0.avi`
-  empty. The cause is inside the vendor sink, not the pipeline wiring.
+## Configuration
 
-## Repository Layout
+`.env` at the repository root holds `WIFI_SSID` / `WIFI_PASSWORD` and is
+committed so builds are reproducible; `firmware/build.rs` embeds them. Add no
+other secret there.
 
-Two independent cargo workspaces, each with its own toolchain and cargo config:
+## Known Limitations
 
-```
-firmware/            xtensa-esp32s3-espidf; .cargo/config.toml, rust-toolchain.toml,
-                     sdkconfig.defaults, components/, gmf-deps/, bindings, partitions.csv
-harness/             host x86_64; .cargo/config.toml, rust-toolchain.toml, tests/
-scripts/             build / flash / device-test / quality harness entry points
-```
-
-Nothing at the repository root overrides either workspace's target, so
-`cargo test` in `harness/` stays on the host and `cargo build` in `firmware/`
-stays on the ESP32-S3.
-
-## Build and Host Checks
-
-```bash
-./scripts/test-harness.sh
-./scripts/build-firmware.sh
-
-# End-to-end quality harness: flash, wait for RTSP, record 60 s, analyse
-./harness/stream_quality.sh --seconds 60 --width 640 --height 480
-
-# Without re-flashing (board already running):
-./harness/stream_quality.sh --no-flash --width 640 --height 480
-```
-
-`stream_quality.sh` reports bitrate, resolution, A/V parameters, JPEG
-integrity (SOI/EOI, corrupt DC), blur/blockiness means, freeze/black
-intervals and >3 sigma colour outliers. Analysis is Rust
-(`harness/src/analyze.rs`, binary `stream-analyze`); ffmpeg/ffprobe are the
-only external tools.
-
-Equivalent direct commands:
-
-```bash
-(cd harness && cargo test)
-(cd firmware && cargo build --target xtensa-esp32s3-espidf)
-```
-
-The harness uses its own pinned toolchain.
-
-Flashing must include the partition table, otherwise the board keeps the
-image already in flash (the IDF default 8 MB single-app layout) and
-`firmware/partitions.csv` never takes effect:
-
-```bash
-./scripts/flash.sh              # builds, then flashes elf + partition table to /dev/ttyACM0
-./scripts/flash.sh /dev/ttyUSB0 # or pass a port
-```
-
-## Wi-Fi Credentials
-
-`WIFI_SSID` and `WIFI_PASSWORD` live in `.env` at the repository root and are
-committed deliberately so builds are reproducible; `firmware/build.rs` embeds
-them into `OUT_DIR/wifi_credentials.rs`. `.env.*` remains ignored for
-per-environment overrides. Do not add any other secret to `.env`.
-
-## Approval Gates
-
-The following actions are not part of normal host verification and require
-explicit approval for the specific run:
-
-1. Flashing or running device tests, including
-   `scripts/run-device-tests.sh --timeout-seconds 300`, writes firmware to the
-   board and requires a connected board.
-2. RTSP live tests connect to the board over the LAN and require approval for
-   the target IP, client, and network.
-3. SD tests mount and write the card. They require approval for the card and
-   data location because they mutate removable storage.
-
-Flashing and the live RTSP session were run with the board attached and the
-user's approval; the measurements above come from that run. No SD write has
-been attempted.
-
-See [the architecture reference](firmware/docs/architecture.md) for data flow
-and component versions, and [the failure-mode reference](firmware/docs/failure-modes.md)
-for diagnostics and recovery boundaries.
+- **AVI recording is gated off** (`avi-recording`, default off): the
+  `esp_muxer_service` sink requests the capture provider's global cache, which
+  starves the RTSP video sink, and the file stays empty. The cause is inside
+  the vendor sink.
+- Device tests, flashing and the live capture require the board attached.
