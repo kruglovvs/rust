@@ -54,8 +54,8 @@ ESP_ENV=(env -i HOME=/home/esp
   RUSTUP_HOME=/home/esp/.rustup CARGO_HOME=/home/esp/.cargo
   IDF_PATH=/opt/esp/idf IDF_TOOLS_PATH=/opt/esp/idf-tools
   RUSTUP_TOOLCHAIN=esp
-  CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-  CARGO_WORKSPACE_DIR="$ROOT")
+  CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$FW/target}"
+  CARGO_WORKSPACE_DIR="$FW")
 
 # evaluate LOG EXPECTED REASON
 #   REASON is the monitor-loop termination cause: ok | timeout | idle | boot.

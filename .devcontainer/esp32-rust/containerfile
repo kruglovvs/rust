@@ -5,9 +5,21 @@ USER root
 # ffmpeg/ffprobe: stream capture + artefact analysis (harness/stream_quality.sh)
 # usbutils/iproute2/procps/psmisc: serial and USB diagnostics (lsusb, ip, ps, fuser)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      nodejs npm curl ca-certificates \
+      nodejs npm curl ca-certificates git cmake ninja-build python3-venv \
       ffmpeg usbutils iproute2 procps psmisc \
     && rm -rf /var/lib/apt/lists/*
+
+# The rust image ships the Xtensa Rust toolchain but not ESP-IDF itself.
+# Install the IDF source and the esp32s3 toolchain where IDF_PATH /
+# IDF_TOOLS_PATH point (see devcontainer.json containerEnv). Without this the
+# esp-idf-sys build script fails with:
+#   could not determine esp-idf version from '/opt/esp/idf/tools/cmake/version.cmake'
+ARG IDF_VERSION=v5.5.2
+RUN git clone -b ${IDF_VERSION} --depth 1 --shallow-submodules --recursive \
+      https://github.com/espressif/esp-idf.git /opt/esp/idf \
+ && cd /opt/esp/idf \
+ && IDF_TOOLS_PATH=/opt/esp/idf-tools ./install.sh esp32s3 \
+ && rm -rf /opt/esp/idf/.git
 # RUN npm install -g n && n lts
 RUN hash -r && npm install -g node@latest
 # RUN hash -r && npm install -g npm@latest

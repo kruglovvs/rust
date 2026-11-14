@@ -1,3 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "components/logging",
+    "components/net",
+    "components/storage",
+    "components/media",
+]
+
+[workspace.package]
+rust-version = "1.85"
+
 [package]
 name = "esp32s3-av-firmware"
 version = "0.1.0"
@@ -24,3 +36,6 @@ rtsp-selftest = []
 [package.metadata.esp-idf-sys]
 # Relative to this package dir. Pinned octal-PSRAM + test-headroom sdkconfig.
 esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
+
+[profile.release]
+opt-level = "z"

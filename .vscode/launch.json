@@ -6,12 +6,12 @@
       "type": "cortex-debug",
       "request": "attach",
       "cwd": "${workspaceFolder}",
-      "executable": "${workspaceFolder}/target/xtensa-esp32s3-espidf/debug/esp32s3-av-firmware",
+      "executable": "${workspaceFolder}/firmware/target/xtensa-esp32s3-espidf/debug/esp32s3-av-firmware",
       "servertype": "openocd",
       "interface": "jtag",
       "toolchainPrefix": "xtensa-esp32s3-elf",
       "gdbPath": "/opt/esp/idf-tools/tools/xtensa-esp-elf-gdb/16.3_20250913/xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb",
-      "objdumpPath": "/home/esp/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump",
+      "objdumpPath": "/opt/esp/idf-tools/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump",
       "serverpath": "/opt/esp/idf-tools/tools/openocd-esp32/v0.12.0-esp32-20250707/openocd-esp32/bin/openocd",
       "searchDir": [
         "/opt/esp/idf-tools/tools/openocd-esp32/v0.12.0-esp32-20250707/openocd-esp32/share/openocd/scripts"
@@ -33,12 +33,12 @@
       "type": "cortex-debug",
       "request": "attach",
       "cwd": "${workspaceFolder}",
-      "executable": "${workspaceFolder}/target/xtensa-esp32s3-espidf/debug/esp32s3-av-firmware",
+      "executable": "${workspaceFolder}/firmware/target/xtensa-esp32s3-espidf/debug/esp32s3-av-firmware",
       "servertype": "openocd",
       "interface": "jtag",
       "toolchainPrefix": "xtensa-esp32s3-elf",
       "gdbPath": "/opt/esp/idf-tools/tools/xtensa-esp-elf-gdb/16.3_20250913/xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb",
-      "objdumpPath": "/home/esp/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump",
+      "objdumpPath": "/opt/esp/idf-tools/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump",
       "serverpath": "/opt/esp/idf-tools/tools/openocd-esp32/v0.12.0-esp32-20250707/openocd-esp32/bin/openocd",
       "searchDir": [
         "/opt/esp/idf-tools/tools/openocd-esp32/v0.12.0-esp32-20250707/openocd-esp32/share/openocd/scripts"

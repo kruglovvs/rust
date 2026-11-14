@@ -12,7 +12,10 @@ build-std = ["std", "panic_abort"]
 [env]
 MCU = "esp32s3"
 ESP_IDF_VERSION = "v5.5.2"
-ESP_IDF_TOOLS_INSTALL_DIR = "global"
+ESP_IDF_TOOLS_INSTALL_DIR = "custom:/opt/esp/idf-tools"
+# bindgen needs the Xtensa-capable libclang that espup installs; without this
+# it falls back to the host LLVM and fails with "unknown target triple xtensa".
+LIBCLANG_PATH = "/home/esp/.espup/esp-clang"
 # Base ESP-IDF has no OV2640/OV3660 sensor driver; this adds
 # espressif/esp32-camera plus its bindings. See camera-extra.toml.
 # Todo 14: espressif/mdns is an EXTRA managed component on ESP-IDF 5.5+
@@ -23,4 +26,4 @@ ESP_IDF_SYS_EXTRA_COMPONENTS_FILE = "/workspaces/rust/firmware/camera-extra.toml
 
 # Uncomment this if you have moved the target dir by setting CARGO_TARGET_DIR or similar.
 # Required for now due to embuild limitations.
-CARGO_WORKSPACE_DIR = { value = "", relative = true }
+ESP_IDF_SYS_ROOT_CRATE = "esp32s3-av-firmware"

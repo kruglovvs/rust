@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-build_dirs=("$root"/target/xtensa-esp32s3-espidf/debug/build/esp-idf-sys-*/out/build)
+build_dirs=("$root"/firmware/target/xtensa-esp32s3-espidf/debug/build/esp-idf-sys-*/out/build)
 build_dir=
 
 for candidate in "${build_dirs[@]}"; do
@@ -14,7 +14,7 @@ for candidate in "${build_dirs[@]}"; do
 done
 
 if [[ -z "$build_dir" ]]; then
-  printf 'No ESP-IDF flasher_args.json found under %s/target. Build the firmware first.\n' "$root" >&2
+  printf 'No ESP-IDF flasher_args.json found under %s/firmware/target. Build the firmware first.\n' "$root" >&2
   exit 1
 fi
 

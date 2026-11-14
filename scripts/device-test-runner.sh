@@ -15,7 +15,7 @@ bin="${1:?device-test-runner: missing binary path}"
 shift || true
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-target="${CARGO_TARGET_DIR:-$root/target}"
+target="${CARGO_TARGET_DIR:-$root/firmware/target}"
 table="$target/xtensa-esp32s3-espidf/debug/partition-table.bin"
 port="${ESP32_PORT:-/dev/ttyACM0}"
 timeout_s="${ESP32_TEST_SECS:-180}"

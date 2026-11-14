@@ -11,7 +11,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 fw="$root/firmware"
-target="${CARGO_TARGET_DIR:-$root/target}"
+target="${CARGO_TARGET_DIR:-$fw/target}"
 art="$target/xtensa-esp32s3-espidf/debug"
 port="${1:-/dev/ttyACM0}"
 
