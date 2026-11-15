@@ -33,20 +33,21 @@
 //! One inline accept loop cannot both serve a multi-hundred-megabyte download
 //! and answer a status request, so the model is fixed:
 //!
-//! - **One accept thread** (16 KiB stack) calls [`std::net::TcpListener::accept`]
+//! - **One accept thread** (8 KiB stack) calls [`std::net::TcpListener::accept`]
 //!   and nothing else. It never reads a request byte: it hands the accepted
 //!   stream to a worker or answers the connection itself.
-//! - **Two worker threads** (24 KiB stacks each) are created once by [`start`]
-//!   and live for the life of the server. Each owns one job channel and blocks
+//! - **One worker thread** (16 KiB stack) is created once by [`start`]
+//!   and lives for the life of the server. It owns one job channel and blocks
 //!   on it when idle; a connection is never served by a thread spawned for it,
 //!   so the thread count cannot grow with the client count.
-//! - **At most two workers run at once.** Admission is a two-bit slot set
-//!   ([`Slots`]): the accept thread takes a free slot, sends the stream to that
-//!   slot's worker and moves the guard along with the job, so the slot is held
-//!   for exactly the connection and released when the worker drops it. When
-//!   both slots are taken the accept thread writes `HTTP/1.1 503` with the JSON
-//!   `ApiError` body on its own and closes, which is why a long download can
-//!   never make the status endpoint wait.
+//! - **At most one worker runs at once.** Admission is a one-bit slot set
+//!   ([`Slots`]): the accept thread takes the free slot, sends the stream to
+//!   that slot's worker and moves the guard along with the job, so the slot is
+//!   held for exactly the connection and released when the worker drops it.
+//!   When the slot is taken the accept thread writes `HTTP/1.1 503` with the
+//!   JSON `ApiError` body on its own and closes, so a long download can never
+//!   make a second connection wait - it is refused at once, and the single
+//!   worker is released as soon as that download ends.
 //! - **Per connection:** a 10 s read timeout and a 10 s write timeout, at most
 //!   [`MAX_HEAD`] (8192) bytes of request head, one request, one response, then
 //!   close. The response always carries `Connection: close`, so a client that
@@ -73,7 +74,7 @@
 //!
 //! The head buffer is allocated on the heap rather than on the worker stack:
 //! the worker already holds [`crate::body::CHUNK`] (4 KiB) while it streams and
-//! builds a JSON body, and 8 KiB more on a 24 KiB stack would leave too little
+//! builds a JSON body, and 8 KiB more on a 16 KiB stack would leave too little
 //! for the standard-library call frames.
 //!
 //! # Response heads
@@ -89,13 +90,18 @@
 //!
 //! # Stack budget
 //!
-//! 2 x 24 KiB of worker stack plus 16 KiB of accept stack is about 64 KiB of
-//! internal SRAM spent before a single request is served. [`start`] therefore
-//! reads `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)` after the threads exist
-//! and refuses to run with less than 64 KiB left. This is the crate's second
-//! device call after [`crate::status`]; it exists because the stacks are the
-//! server's own allocation and a boot with no headroom left would starve the
-//! media pipeline instead of failing honestly.
+//! One 16 KiB worker stack plus the 8 KiB accept thread is 24 KiB of internal
+//! SRAM spent before a single request is served (measured: 27 136 B including
+//! the pthread control blocks). ESP-IDF allocates Rust `std::thread` stacks
+//! with `MALLOC_CAP_INTERNAL` even when
+//! `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y`, so the 8 MiB PSRAM cannot
+//! pay for them and the sizes are the measured fit beside the media pipeline.
+//! [`start`] therefore reads `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)`
+//! after the threads exist and refuses to run with less than
+//! [`MIN_INTERNAL_FREE`] left. This is the crate's second device call after
+//! [`crate::status`]; it exists because the stacks are the server's own
+//! allocation and a boot with no headroom left would starve the media pipeline
+//! instead of failing honestly.
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -128,13 +134,15 @@ const LIST_DIR: &str = "rec";
 const HEAD_BUFFER: usize = 512;
 
 /// How many connections can be served at once.
-const WORKERS: usize = 2;
+const WORKERS: usize = 1;
 
 /// Stack of the accept thread, in bytes. It only accepts and writes a `503`.
-const ACCEPT_STACK: usize = 16 * 1024;
+const ACCEPT_STACK: usize = 8 * 1024;
 
-/// Stack of one worker thread, in bytes. It parses, routes and streams.
-const WORKER_STACK: usize = 24 * 1024;
+/// Stack of one worker thread, in bytes. It parses, routes and streams: the
+/// 8 KiB request head and the 4 KiB chunk live on the heap, so this covers the
+/// call frames plus the small response-head buffers.
+const WORKER_STACK: usize = 16 * 1024;
 
 /// Read and write timeout of one connection.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -144,13 +152,19 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HEAD: usize = crate::http::MAX_HEAD;
 
 /// Internal SRAM that must remain free after the server's threads exist.
+///
+/// Measured, not guessed: the media pipeline's own internal-RAM footprint was
+/// 57 552 B on the earlier server-down boot and 48 000 B with the server
+/// running, so 64 KiB leaves 7 984 B above the worst measured pipeline. With
+/// these thread sizes the measured free at this check was 83 327 B, 17 791 B
+/// above the guard.
 const MIN_INTERNAL_FREE: usize = 64 * 1024;
 
 /// How long the accept loop backs off after an accept error that is neither a
 /// stop signal nor an interrupted call.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(20);
 
-/// The log line of a connection rejected because both worker slots were busy.
+/// The log line of a connection rejected because every worker slot was busy.
 const BUSY_LOG: &str = "filesrv: 503 busy";
 
 /// Everything the server needs to answer requests. Plain data: no handles and
@@ -241,7 +255,7 @@ impl Drop for Server {
 ///
 /// Brings LwIP up (idempotent, so the boot path calling it first is fine), binds
 /// every interface on `config.port` (`0` picks an ephemeral port), creates the
-/// two workers and the accept thread, then checks that the internal heap still
+/// worker and the accept thread, then checks that the internal heap still
 /// has [`MIN_INTERNAL_FREE`] bytes. A server that started and then finds the
 /// budget gone is stopped again before the typed error is returned.
 pub fn start(config: Config) -> Result<Server, Error> {
@@ -295,7 +309,7 @@ pub fn start(config: Config) -> Result<Server, Error> {
     Ok(server)
 }
 
-/// Which worker owns which connection, as a two-bit set.
+/// Which worker owns which connection, as a one-bit-per-worker set.
 struct Slots {
     busy: AtomicUsize,
 }
@@ -307,7 +321,7 @@ impl Slots {
         })
     }
 
-    /// Take the lowest idle worker, or `None` when both are busy.
+    /// Take the lowest idle worker, or `None` when every worker is busy.
     fn try_acquire(self: &Arc<Self>) -> Option<Slot> {
         let mask = (1usize << WORKERS) - 1;
         let mut current = self.busy.load(Ordering::Acquire);
@@ -423,7 +437,7 @@ fn busy_response(mut stream: TcpStream) {
     let mut body = String::new();
     json::error_body(
         Status::SERVICE_UNAVAILABLE,
-        "both worker slots are busy; retry shortly",
+        "all worker slots are busy; retry shortly",
         &mut body,
     );
     let head = ResponseHead::new(Status::SERVICE_UNAVAILABLE, JSON, body.len() as u64);
@@ -861,7 +875,7 @@ mod tests {
         read_to_close(&mut stream)
     }
 
-    /// Wait until both worker slots are taken: a request that still gets `200`
+    /// Wait until every worker slot is taken: a request that still gets `200`
     /// proves a slot was free, so it is retried. Every retry closes its own
     /// connection, which releases the slot it used.
     fn probe_until_busy(server: &Server) -> String {
@@ -972,19 +986,20 @@ mod tests {
     }
 
     #[test]
-    fn worker_slots_cap_at_two() {
+    fn worker_slots_cap_at_worker_count() {
         let slots = Slots::new();
-        let first = slots.try_acquire().expect("the first slot is free");
-        let second = slots.try_acquire().expect("the second slot is free");
-        assert_ne!(
-            first.index(),
-            second.index(),
-            "each slot names its own worker"
-        );
+        let mut held = std::vec::Vec::with_capacity(WORKERS);
+        for index in 0..WORKERS {
+            let slot = slots
+                .try_acquire()
+                .unwrap_or_else(|| panic!("worker {index} slot is free"));
+            assert_eq!(slot.index(), index, "each slot names its own worker");
+            held.push(slot);
+        }
         assert_eq!(slots.busy_count(), WORKERS);
         assert!(
             slots.try_acquire().is_none(),
-            "a third connection must be rejected, not queued"
+            "a connection beyond capacity must be rejected, not queued"
         );
         assert_eq!(
             slots.busy_count(),
@@ -1005,16 +1020,13 @@ mod tests {
 
         let again = slots.try_acquire().expect("the released slot is reusable");
         assert_eq!(again.index(), 0);
-        let other = slots.try_acquire().expect("the second slot is still free");
-        assert_eq!(other.index(), 1);
     }
 
     #[test]
-    fn third_connection_gets_503() {
+    fn connection_beyond_capacity_gets_503() {
         let _guard = sockets();
         let server = start_on_port_zero();
-        let _first = connect(&server);
-        let _second = connect(&server);
+        let _held: std::vec::Vec<TcpStream> = (0..WORKERS).map(|_| connect(&server)).collect();
 
         let response = probe_until_busy(&server);
         assert!(
@@ -1044,8 +1056,7 @@ mod tests {
     fn accept_thread_never_parses() {
         let _guard = sockets();
         let server = start_on_port_zero();
-        let _first = connect(&server);
-        let _second = connect(&server);
+        let _held: std::vec::Vec<TcpStream> = (0..WORKERS).map(|_| connect(&server)).collect();
         probe_until_busy(&server);
 
         // Nothing is written on this connection. An accept thread that parsed
@@ -1055,7 +1066,7 @@ mod tests {
         let response = read_to_close(&mut silent);
         assert!(
             response.starts_with("HTTP/1.1 503"),
-            "a silent third connection is rejected without a parse: {response}"
+            "a silent connection beyond capacity is rejected without a parse: {response}"
         );
     }
 

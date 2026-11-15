@@ -8,6 +8,15 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 
+# Task stacks may come from PSRAM. This is the FreeRTOS option
+# (FREERTOS_TASK_CREATE_ALLOW_EXT_MEM, default y here already); it does NOT move
+# Rust std::thread stacks, because IDF's pthread layer allocates those with
+# MALLOC_CAP_INTERNAL and only `esp_pthread_set_cfg` can change that. Measured
+# in task 22: adding this line left the fileserver's internal-RAM footprint
+# unchanged, so the server stacks were slimmed instead. Kept explicit so a
+# future toolchain default change cannot drop the option silently.
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
 # XIAO ESP32S3 Sense has 8 MiB onboard flash.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
