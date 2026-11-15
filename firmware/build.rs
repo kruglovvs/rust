@@ -12,16 +12,19 @@
 //! bare `ldproxy` with no `--ldproxy-linker` and panics
 //! ("Cannot locate argument '--ldproxy-linker <linker>'").
 //!
-//! Deliberately dependency-free: embuild could do the parse, but adding a
-//! `[build-dependencies]` entry to `firmware/Cargo.toml` is out of scope for
-//! this task. The value is `shlex::join`-encoded, so we un-split it here.
+//! Deliberately dependency-free: the shlex un-splitting and the per-argument
+//! emission live in `build_support.rs`, shared with the four component build
+//! scripts. This script adds the C-source patches before it emits.
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+include!("build_support.rs");
+
 fn main() {
+    println!("cargo:rerun-if-changed=build_support.rs");
     warn_missing_wifi_credentials();
     // The knob is a C-source patch input, not a Rust constant: `settings.rs`
     // resolves the same variable with `option_env!` for the app.
@@ -43,24 +46,12 @@ fn main() {
     // flag needs GCC's `-Wl,` passthrough.
     println!("cargo:rustc-link-arg=-Wl,--wrap=sdspi_host_do_transaction");
 
-    // cargo uppercases metadata keys for the DEP_<LINKS>_<KEY> env var; match
-    // on the suffix so casing differences do not matter.
-    let link_args = env::vars().find(|(key, value)| {
-        key.starts_with("DEP_") && key.ends_with("EMBUILD_LINK_ARGS") && !value.is_empty()
-    });
-
-    match link_args {
-        Some((key, value)) => {
-            let args = shlex_split(&value);
+    match forward_link_args() {
+        Some((key, args)) => {
             patch_esp32_camera_eoi_scan(&args);
             patch_esp32_camera_soi_dump(&args);
             patch_esp_capture_jpeg_quality(&args, &jpeg_quality);
-            for arg in args {
-                // One directive per argument: each value is a single argv item.
-                println!("cargo::rustc-link-arg={arg}");
-            }
-            // Re-run if the propagated set changes (esp-idf-sys rebuild).
-            println!("cargo:rerun-if-env-changed={key}");
+            emit_link_args(&key, &args);
         }
         None => {
             // Surface the failure instead of letting ldproxy panic downstream.
@@ -434,70 +425,4 @@ fn rewrite_exfat_line(line: &str) -> Option<String> {
         return None;
     }
     Some(format!("{indent}#define FF_FS_EXFAT\t1"))
-}
-
-/// Minimal `shlex` splitter: whitespace separates tokens, single quotes are
-/// literal, double quotes allow backslash escapes, backslash escapes outside
-/// quotes. Mirrors what `shlex::join` (embuild) produces.
-fn shlex_split(input: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut in_token = false;
-    let mut chars = input.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => {
-                in_token = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') | None => break,
-                        Some(ch) => current.push(ch),
-                    }
-                }
-            }
-            '"' => {
-                in_token = true;
-                while let Some(&ch) = chars.peek() {
-                    match ch {
-                        '"' => {
-                            chars.next();
-                            break;
-                        }
-                        '\\' => {
-                            chars.next();
-                            if let Some(esc) = chars.next() {
-                                current.push(esc);
-                            }
-                        }
-                        other => {
-                            chars.next();
-                            current.push(other);
-                        }
-                    }
-                }
-            }
-            '\\' => {
-                in_token = true;
-                if let Some(esc) = chars.next() {
-                    current.push(esc);
-                }
-            }
-            c if c.is_whitespace() => {
-                if in_token {
-                    tokens.push(std::mem::take(&mut current));
-                    in_token = false;
-                }
-            }
-            other => {
-                in_token = true;
-                current.push(other);
-            }
-        }
-    }
-
-    if in_token {
-        tokens.push(current);
-    }
-    tokens
 }
