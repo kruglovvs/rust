@@ -1,0 +1,19 @@
+[package]
+name = "fileserver"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[dependencies]
+# The server runs on the board's own std sockets: no async runtime, no HTTP
+# crate. `net` is needed because the device HIL tests bring the station up and
+# read its IPv4 address, `storage` for the `/sdcard` mount path.
+esp-idf-sys = "=0.38.1"
+esp-idf-hal = "=0.47.0"
+esp-idf-svc = "=0.53.0"
+logging = { path = "../logging" }
+net = { path = "../net" }
+storage = { path = "../storage" }
+# Status and listing bodies are serialised tree-free: plain `serde_json`
+# without the `preserve_order`/`arbitrary_precision` features.
+serde_json = "1"

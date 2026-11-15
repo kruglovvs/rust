@@ -598,6 +598,7 @@ dependencies = [
  "esp-idf-hal",
  "esp-idf-svc",
  "esp-idf-sys",
+ "fileserver",
  "logging",
  "media",
  "net",
@@ -609,6 +610,19 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "fileserver"
+version = "0.1.0"
+dependencies = [
+ "esp-idf-hal",
+ "esp-idf-svc",
+ "esp-idf-sys",
+ "logging",
+ "net",
+ "serde_json",
+ "storage",
+]
 
 [[package]]
 name = "filetime"

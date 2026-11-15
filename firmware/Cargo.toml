@@ -5,6 +5,7 @@ members = [
     "components/net",
     "components/storage",
     "components/media",
+    "components/fileserver",
 ]
 
 [workspace.package]
@@ -25,6 +26,7 @@ logging = { path = "components/logging" }
 net = { path = "components/net" }
 storage = { path = "components/storage" }
 media = { path = "components/media" }
+fileserver = { path = "components/fileserver" }
 
 [features]
 avi-recording = ["media/avi-recording"]
