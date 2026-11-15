@@ -11,9 +11,3 @@ esp-idf-svc = "=0.53.0"
 logging = { path = "../logging" }
 # Aligned sector buffers for the pre-mount filesystem probe.
 aligned = { version = "=0.4", default-features = false }
-
-[features]
-# Format the SD card to FAT32 on the first mount attempt (destructive,
-# compile-time opt-in). Preserved from the firmware crate so the interposer
-# and mount flow behave exactly as before.
-sd-format-on-mount = []

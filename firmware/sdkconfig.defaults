@@ -59,16 +59,6 @@ CONFIG_FATFS_USE_FASTSEEK=y
 CONFIG_FATFS_USE_LABEL=y
 CONFIG_CAMERA_PSRAM_DMA=y
 
-# exFAT is NOT a Kconfig option in ESP-IDF FatFs.
-#
-# `components/fatfs/src/ffconf.h` hardcodes `#define FF_FS_EXFAT 0`, and
-# `components/fatfs/Kconfig` defines no FATFS_EXFAT symbol, so a
-# `CONFIG_FATFS_EXFAT=y` line is silently ignored (it is not even emitted to
-# sdkconfig). Enabling exFAT requires patching that header:
-#   FF_FS_EXFAT 1  and  FF_USE_LFN >= 1
-# (see the comment above `FF_FS_EXFAT` in ffconf.h). That patch is outside
-# Kconfig/sdkconfig.defaults and is deliberately not applied here.
-
 # The camera component uses the legacy I2C driver; ESP-IDF also links the new
 # I2C driver through the HAL dependency graph. No new-driver bus is instantiated
 # by this firmware. Skip the constructor-only coexistence abort so legacy camera

@@ -611,11 +611,6 @@ pub enum StorageError {
     },
     /// `esp_vfs_fat_info` failed after a successful mount.
     FreeSpaceQuery { source: esp_idf_sys::EspError },
-    /// SD card format to FAT32 failed (one-time format attempt).
-    FormatFailed {
-        cs: CsPin,
-        source: esp_idf_sys::EspError,
-    },
 }
 
 impl fmt::Display for StorageError {
@@ -673,9 +668,6 @@ impl fmt::Display for StorageError {
             ),
             StorageError::FreeSpaceQuery { source } => {
                 write!(f, "esp_vfs_fat_info failed: {source}")
-            }
-            StorageError::FormatFailed { cs, source } => {
-                write!(f, "SD card format to FAT32 failed on {cs}: {source}")
             }
         }
     }
@@ -873,10 +865,9 @@ fn probe_pin<'d>(spi: &'d SpiDriver<'d>, cs: CsPin) -> Result<ProbeOutcome, Stor
 /// Read sector 0 plus the first MBR partition's boot sector and name the
 /// filesystem on the card.
 ///
-/// This runs before FatFs sees the card, so it distinguishes "the card has an
-/// exFAT volume" (unmountable: ESP-IDF FatFs is compiled with
-/// `FF_FS_EXFAT 0`) from "the card has no recognizable volume at all". Without
-/// it a failed mount collapses into `ENODEV` and cannot be attributed.
+/// This runs before FatFs sees the card, so it distinguishes a FAT32 volume
+/// from "the card has no recognizable volume at all". Without it a failed mount
+/// collapses into `ENODEV` and cannot be attributed.
 fn detect_filesystem(card: &esp_idf_sys::sdmmc_card_t) -> &'static str {
     let card_ptr = card as *const _ as *mut esp_idf_sys::sdmmc_card_t;
     let mut mbr: Aligned<A4, [u8; 512]> = Aligned([0u8; 512]);
@@ -918,9 +909,7 @@ fn detect_filesystem(card: &esp_idf_sys::sdmmc_card_t) -> &'static str {
         return "unreadable";
     }
     let b = &boot;
-    let kind = if &b[3..11] == b"EXFAT   " {
-        "exFAT"
-    } else if &b[82..90] == b"FAT32   " {
+    let kind = if &b[82..90] == b"FAT32   " {
         "FAT32"
     } else {
         "unknown"
@@ -966,10 +955,6 @@ impl<'d> Storage<'d> {
     /// Returns [`StorageError::CardAbsent`] when no pin selects a card —
     /// the caller then continues streaming **without** storage, never with a
     /// bare "mount failed".
-    ///
-    /// If the `sd-format-on-mount` feature is enabled and the initial mount fails
-    /// with a format/volume error, attempts a one-time FAT32 format via
-    /// `esp_vfs_fat_sdcard_format` and retries the mount.
     pub fn bringup(
         spi: &'d SpiDriver<'d>,
         pins: CandidatePins,
@@ -1125,45 +1110,12 @@ impl<'d> Storage<'d> {
         );
         let filesystem = detect_filesystem(card);
 
-        // `mut` is only needed by the optional pre-mount format path.
-        #[allow(unused_mut)]
-        let mut fatfs =
+        let fatfs =
             Fatfs::new_sdcard(DRIVE, sd).map_err(|source| StorageError::FormatOrVolume {
                 cs,
                 stage: "ff_diskio_register",
                 detail: source.to_string(),
             })?;
-
-        // `Fatfs::format` enters the VFS layer and never returns on this board,
-        // so format the registered diskio drive directly with FatFs instead.
-        #[cfg(feature = "sd-format-on-mount")]
-        {
-            println!(
-                "storage: sd-format-on-mount enabled; formatting {} as exFAT via f_mkfs",
-                cs.label()
-            );
-
-            let mut work: Aligned<A4, [u8; 4096]> = Aligned([0u8; 4096]);
-            let parm = esp_idf_sys::MKFS_PARM {
-                fmt: (esp_idf_sys::FM_EXFAT | esp_idf_sys::FM_SFD) as u8,
-                n_fat: 0,
-                align: 0,
-                n_root: 0,
-                au_size: 0,
-            };
-            // SAFETY: the drive path is a NUL-terminated C string, the MKFS_PARM
-            // outlives the call, and `work` is a live 4 KiB buffer whose length
-            // is passed exactly; FatFs retains neither pointer.
-            let result = unsafe {
-                esp_idf_sys::f_mkfs(
-                    c"0:".as_ptr(),
-                    &parm,
-                    work.as_mut_ptr() as *mut core::ffi::c_void,
-                    work.len() as u32,
-                )
-            };
-            println!("storage: f_mkfs EXFAT|SFD result={result}");
-        }
 
         let chain = MountedFatfs::mount(fatfs, BASE_PATH, MAX_OPEN_FILES).map_err(|source| {
             let e = StorageError::FormatOrVolume {
@@ -1188,35 +1140,15 @@ impl<'d> Storage<'d> {
             println!("storage: ERROR: {err}");
 
             if e.raw_os_error() == Some(19) {
-                if filesystem == "exFAT" {
-                    println!(
-                        "storage: volume ENODEV — the card is exFAT-formatted and ESP-IDF \
-                         5.5.2 FatFs is compiled with FF_FS_EXFAT 0 \
-                         (components/fatfs/src/ffconf.h:282), so it cannot mount. \
-                         Reformat the card as FAT32 or patch ffconf.h (set FF_FS_EXFAT 1 and \
-                         FF_USE_LFN >= 1); no Kconfig symbol can enable exFAT."
-                    );
-                } else {
-                    println!(
-                        "storage: volume ENODEV — sdmmc_card_init succeeded but no mountable \
-                         FAT volume was found (filesystem probe: {filesystem}). The card is \
-                         readable at the sector level; reformat it as FAT32."
-                    );
-                }
+                println!(
+                    "storage: volume ENODEV — sdmmc_card_init succeeded but no mountable \
+                     FAT32 volume was found (filesystem probe: {filesystem}). The card is \
+                     readable at the sector level; storage is FAT32-only, so the card must \
+                     be reformatted as FAT32 before it is inserted."
+                );
             }
 
-            #[cfg(not(feature = "sd-format-on-mount"))]
-            {
-                return Err(err);
-            }
-
-            #[cfg(feature = "sd-format-on-mount")]
-            {
-                // If format was already attempted before mount and still failed,
-                // report the persistent error.
-                println!("storage: volume still invalid after pre-mount format");
-                return Err(err);
-            }
+            return Err(err);
         } else {
             println!(
                 "storage: mount ok — card present on {}, volume is mounted (FAT)",
@@ -1590,9 +1522,9 @@ fn run_acceptance_battery(_real_khz: u32) -> Result<Trial, StorageError> {
         before, after, delta, THROUGHPUT_BYTES
     );
     if delta < THROUGHPUT_BYTES && write_res.is_ok() && !unstable {
-        // FatFs on exFAT does not update the free-cluster count synchronously,
-        // so this delta is unreliable there; the 1 MiB byte-identical
-        // round-trip and the 4 KiB tail read-back stay authoritative.
+        // FatFs does not always update the free-cluster count synchronously, so
+        // this delta is advisory; the 1 MiB byte-identical round-trip and the
+        // 4 KiB tail read-back stay authoritative.
         println!(
             "storage: WARNING: getfree delta {} B does not account for {} B written",
             delta, THROUGHPUT_BYTES
@@ -1960,51 +1892,5 @@ mod tests {
         );
         // Deterministic: two calls agree (read-back compares against it).
         assert_eq!(p, pattern_chunk());
-    }
-
-    /// Destructive, opt-in: reformat the SD card to FAT32 and prove it is
-    /// writable afterwards.
-    ///
-    /// This exists so reformatting is a repeatable command instead of ad-hoc
-    /// code. It is deliberately `#[ignore]`d and feature-gated, because it
-    /// erases the card. Run it with:
-    ///
-    /// ```text
-    /// cargo test --features sd-format-on-mount \
-    ///     --target xtensa-esp32s3-espidf \
-    ///     hil_reformat_sd_card_to_fat32 -- --ignored --nocapture
-    /// ```
-    #[cfg(all(target_os = "espidf", feature = "sd-format-on-mount"))]
-    #[test]
-    #[ignore = "destructive: reformats the SD card to FAT32"]
-    fn hil_reformat_sd_card_to_fat32() {
-        use esp_idf_hal::peripherals::Peripherals;
-
-        let _guard = crate::HIL_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-        let peripherals = Peripherals::take().expect("take SPIC and SD pins");
-        let bus = super::new_bus(
-            peripherals.spi2,
-            peripherals.pins.gpio7,
-            peripherals.pins.gpio9,
-            peripherals.pins.gpio8,
-        )
-        .expect("SPI2 host bus");
-        let pins = super::CandidatePins::new(peripherals.pins.gpio21, peripherals.pins.gpio3);
-
-        // `bringup` formats first when the feature is on, then mounts and runs
-        // the acceptance battery, so success here means formatted AND usable.
-        let storage = super::Storage::bringup(&bus, pins).expect("format + mount");
-        assert_eq!(storage.base_path(), super::BASE_PATH);
-
-        let probe = b"reformat probe";
-        storage.write_file("reformat-probe.txt", probe).expect("write after reformat");
-        let read_back = storage.read_file("reformat-probe.txt").expect("read after reformat");
-        assert_eq!(read_back.as_slice(), probe, "reformatted volume must round-trip");
-        logging::log!(
-            "hil-sd-format: formatted + writable at {} ({} kHz, {} B free)",
-            storage.base_path(),
-            storage.negotiated_khz(),
-            storage.free_bytes()
-        );
     }
 }
