@@ -14,8 +14,10 @@
 //!
 //! * [`Pipeline::start`] builds every handle (I2C bus for the camera SCCB,
 //!   PDM I2S RX channel, `esp_codec_dev` record handle, audio/video sources,
-//!   capture service + setup bundle, RTSP service), links capture to RTSP,
-//!   and starts RTSP **then** capture. On any failure it unwinds everything
+//!   capture service + setup bundle), attaches the consumers selected by
+//!   [`Config::record_mode`], and starts capture **then** the enabled
+//!   consumers. A muxer failure is logged and recording is skipped; it never
+//!   stops RTSP from starting. On any other failure it unwinds everything
 //!   already created in reverse order and returns an [`Error`] naming the
 //!   failed step.
 //! * [`Pipeline::stop`] stops capture then RTSP, unlinks them, and releases
@@ -35,15 +37,18 @@ const CAPTURE_SERVICE_NAME: &[u8] = b"capture\0";
 /// Wide-open RTSP service name.
 const RTSP_SERVICE_NAME: &[u8] = b"rtsp\0";
 /// Recording sink service name.
+#[cfg(feature = "avi-recording")]
 const MUXER_SERVICE_NAME: &[u8] = b"muxer\0";
 /// RTSP path shared by the server URL.
 const RTSP_PATH: &str = "/live";
 /// Default stream id (`ESP_MEDIA_DEFAULT_STREAM`).
 const DEFAULT_STREAM: u16 = 0;
 /// Directory created under the mount point for AVI recordings.
+#[cfg(feature = "avi-recording")]
 const RECORD_DIR: &str = "rec";
-/// AVI recording is opt-in: the muxer sink requests the provider's global
-/// cache, which currently starves the RTSP sink of video frames.
+/// AVI recording is compiled in by default and this feature is the compile-time
+/// kill switch: without it no muxer code is linked, regardless of the runtime
+/// [`RecordMode`].
 const AVI_RECORDING: bool = cfg!(feature = "avi-recording");
 /// PDM microphone clock pin.
 const MIC_CLK_GPIO: i32 = 42;
@@ -58,7 +63,32 @@ pub const DEFAULT_AUDIO_SAMPLE_RATE_HZ: u32 = 48_000;
 /// AAC-LC mono bitrate used when the caller leaves it at zero.
 pub const DEFAULT_AUDIO_BITRATE_BPS: u32 = 64_000;
 /// AVI muxer aligned internal-RAM write cache (16 KiB, as recommended).
+#[cfg(feature = "avi-recording")]
 const MUXER_RAM_CACHE: u32 = 16 * 1024;
+
+/// Which consumers the pipeline attaches to the capture service.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RecordMode {
+    /// AVI muxer and RTSP both attached.
+    #[default]
+    Both,
+    /// RTSP only: the muxer service is never created, linked or started.
+    Stream,
+    /// AVI muxer only: RTSP is not linked or started.
+    Record,
+}
+
+impl RecordMode {
+    /// Whether the AVI muxer sink is attached in this mode.
+    pub const fn records(self) -> bool {
+        matches!(self, RecordMode::Both | RecordMode::Record)
+    }
+
+    /// Whether the RTSP server is attached in this mode.
+    pub const fn streams(self) -> bool {
+        matches!(self, RecordMode::Both | RecordMode::Stream)
+    }
+}
 
 /// Pipeline configuration supplied by the runtime.
 pub struct Config<'a> {
@@ -68,6 +98,8 @@ pub struct Config<'a> {
     /// Mount point of the SD card (`"/sdcard"`). An empty string disables file
     /// recording so streaming still works.
     pub mount_point: &'a str,
+    /// Which consumers to attach; see [`RecordMode`].
+    pub record_mode: RecordMode,
     /// RTSP local port.
     pub port: u16,
     /// Requested video width in pixels (sensor/pipeline negotiate the closest
@@ -287,6 +319,17 @@ fn audio_track_info(cfg: &Config<'_>) -> gmf::esp_media_track_info_t {
     }
 }
 
+/// Whether this configuration records to the card.
+#[cfg_attr(not(feature = "avi-recording"), allow(dead_code))]
+fn wants_recording(cfg: &Config<'_>) -> bool {
+    AVI_RECORDING && cfg.record_mode.records() && !cfg.mount_point.is_empty()
+}
+
+/// Whether this configuration serves RTSP.
+fn wants_stream(cfg: &Config<'_>) -> bool {
+    cfg.record_mode.streams()
+}
+
 /// Owns every handle of the running media pipeline.
 pub struct Pipeline {
     rtsp: *mut gmf::esp_rtsp_service_t,
@@ -417,27 +460,33 @@ impl Pipeline {
         ffi::configure_capture(self.capture, &service_cfg, audio_src, video_src, cfg)?;
 
         // 8b. Recording sink. esp_capture_service's built-in muxer has no AVI
-        //     support, so recording uses esp_muxer_service instead.
-        if AVI_RECORDING && !cfg.mount_point.is_empty() {
-            logging::log!("pipeline: 8b muxer service");
-            self.muxer = ffi::muxer_service(cfg)?;
-            logging::log!("pipeline: 8c muxer link");
-            ffi::link_muxer(self.capture, self.muxer)?;
-            self.muxer_linked = true;
+        //     support, so recording uses esp_muxer_service instead. The sink is
+        //     compiled out without `avi-recording`; a runtime failure here only
+        //     loses recording, never the stream.
+        #[cfg(feature = "avi-recording")]
+        if wants_recording(cfg) {
+            match self.wire_muxer(cfg) {
+                Ok(()) => {}
+                Err(error) => logging::log!("pipeline: WARNING: recording unavailable: {error}"),
+            }
         }
 
-        // 9. RTSP service.
-        logging::log!("pipeline: 9 rtsp service");
-        let rtsp_cfg = gmf::esp_rtsp_service_cfg_t {
-            name: RTSP_SERVICE_NAME.as_ptr() as *const core::ffi::c_char,
-            role: gmf::esp_rtsp_service_role_t_ESP_RTSP_SERVICE_ROLE_SERVER,
-        };
-        self.rtsp = ffi::rtsp_service(&rtsp_cfg, cfg)?;
+        // 9. RTSP service, unless this boot records only.
+        if wants_stream(cfg) {
+            logging::log!("pipeline: 9 rtsp service");
+            let rtsp_cfg = gmf::esp_rtsp_service_cfg_t {
+                name: RTSP_SERVICE_NAME.as_ptr() as *const core::ffi::c_char,
+                role: gmf::esp_rtsp_service_role_t_ESP_RTSP_SERVICE_ROLE_SERVER,
+            };
+            self.rtsp = ffi::rtsp_service(&rtsp_cfg, cfg)?;
 
-        // 10. Join capture -> RTSP over the default stream, no frame plumbing.
-        logging::log!("pipeline: 10 media link");
-        ffi::link(self.capture, self.rtsp)?;
-        self.linked = true;
+            // 10. Join capture -> RTSP over the default stream, no frame plumbing.
+            logging::log!("pipeline: 10 media link");
+            ffi::link(self.capture, self.rtsp)?;
+            self.linked = true;
+        } else {
+            logging::log!("pipeline: rtsp disabled by record-only mode");
+        }
 
         // 11. Start capture before the consumers: the capture provider's tracks
         // are only queryable while running, and both the RTSP `on_start` hook
@@ -446,31 +495,48 @@ impl Pipeline {
         ffi::start_capture(self.capture)?;
         self.capture_started = true;
 
-        if !self.muxer.is_null() {
+        #[cfg(feature = "avi-recording")]
+        if self.muxer_linked {
             logging::log!("pipeline: 11a start muxer");
-            ffi::start_muxer(self.muxer)?;
-            self.muxer_started = true;
+            match ffi::start_muxer(self.muxer) {
+                Ok(()) => self.muxer_started = true,
+                Err(error) => logging::log!(
+                    "pipeline: WARNING: muxer start failed: {error}; continuing without recording"
+                ),
+            }
         }
 
-        logging::log!("pipeline: 12 start rtsp (async)");
-        let rtsp_ptr = self.rtsp as usize;
-        std::thread::Builder::new()
-            .name("rtsp-start".into())
-            .stack_size(16 * 1024)
-            .spawn(move || {
-                let result = ffi::start_rtsp(rtsp_ptr as *mut gmf::esp_rtsp_service_t);
-                match result {
-                    Ok(()) => logging::log!("pipeline: rtsp start returned ok"),
-                    Err(error) => logging::log!("pipeline: rtsp start returned err={error}"),
-                }
-            })
-            .map_err(|_| Error::Esp {
-                step: Step::RtspStart,
-                code: -1,
-            })?;
-        self.rtsp_start_pending = true;
+        if wants_stream(cfg) {
+            logging::log!("pipeline: 12 start rtsp (async)");
+            let rtsp_ptr = self.rtsp as usize;
+            std::thread::Builder::new()
+                .name("rtsp-start".into())
+                .stack_size(16 * 1024)
+                .spawn(move || {
+                    let result = ffi::start_rtsp(rtsp_ptr as *mut gmf::esp_rtsp_service_t);
+                    match result {
+                        Ok(()) => logging::log!("pipeline: rtsp start returned ok"),
+                        Err(error) => logging::log!("pipeline: rtsp start returned err={error}"),
+                    }
+                })
+                .map_err(|_| Error::Esp {
+                    step: Step::RtspStart,
+                    code: -1,
+                })?;
+            self.rtsp_start_pending = true;
+        }
 
         logging::log!("pipeline: started");
+        Ok(())
+    }
+
+    #[cfg(feature = "avi-recording")]
+    fn wire_muxer(&mut self, cfg: &Config<'_>) -> Result<(), Error> {
+        logging::log!("pipeline: 8b muxer service");
+        self.muxer = ffi::muxer_service(cfg)?;
+        logging::log!("pipeline: 8c muxer link");
+        ffi::link_muxer(self.capture, self.muxer)?;
+        self.muxer_linked = true;
         Ok(())
     }
 }
@@ -484,6 +550,7 @@ impl Drop for Pipeline {
 /// The only `unsafe` in this crate: every raw ESP-IDF/GMF call lives here.
 mod ffi {
     use super::*;
+    #[cfg(feature = "avi-recording")]
     use core::ffi::c_char;
     use core::ffi::CStr;
     use core::ptr::{null, null_mut};
@@ -709,14 +776,20 @@ mod ffi {
     }
 
     /// Register the default muxer and encoders. Order matters: encoders first,
-    /// then the muxer. All three report success as 0.
+    /// then the muxer. All three report success as 0. The muxer registration is
+    /// compiled out with the feature so the kill-switch build links no GMF
+    /// muxer code of its own.
     pub fn register_defaults() -> Result<(), Error> {
         let code = unsafe { gmf::esp_audio_enc_register_default() };
         check(code, Step::RegisterAudioEncoder)?;
         let code = unsafe { gmf::esp_video_enc_register_default() };
         check(code, Step::RegisterVideoEncoder)?;
-        let code = unsafe { gmf::esp_muxer_register_default() };
-        check(code, Step::RegisterMuxer)
+        #[cfg(feature = "avi-recording")]
+        {
+            let code = unsafe { gmf::esp_muxer_register_default() };
+            check(code, Step::RegisterMuxer)?;
+        }
+        Ok(())
     }
 
     pub fn capture_service(
@@ -784,6 +857,7 @@ mod ffi {
         check(code, Step::CaptureSetupApply)
     }
 
+    #[cfg(feature = "avi-recording")]
     pub fn muxer_service(cfg: &Config<'_>) -> Result<*mut gmf::esp_muxer_service_t, Error> {
         let mut service: *mut gmf::esp_muxer_service_t = null_mut();
         let service_cfg = gmf::esp_muxer_service_cfg_t {
@@ -820,6 +894,7 @@ mod ffi {
         Ok(service)
     }
 
+    #[cfg(feature = "avi-recording")]
     pub fn link_muxer(
         capture: *mut gmf::esp_capture_service_t,
         muxer: *mut gmf::esp_muxer_service_t,
@@ -835,6 +910,7 @@ mod ffi {
         check(code, Step::MuxerLink)
     }
 
+    #[cfg(feature = "avi-recording")]
     pub fn start_muxer(service: *mut gmf::esp_muxer_service_t) -> Result<(), Error> {
         let code = unsafe { gmf::esp_service_start(service as *mut gmf::esp_service_t) };
         check(code, Step::MuxerStart)
@@ -994,6 +1070,7 @@ mod ffi {
                 pipeline.capture = null_mut();
             }
             if pipeline.registered {
+                #[cfg(feature = "avi-recording")]
                 gmf::esp_muxer_unregister_default();
                 gmf::esp_video_enc_unregister_default();
                 gmf::esp_audio_enc_unregister_default();
@@ -1089,6 +1166,7 @@ mod tests {
         let cfg = Config {
             ipv4: None,
             mount_point: "",
+            record_mode: RecordMode::Both,
             port: 554,
             width: 640,
             height: 480,
@@ -1113,6 +1191,7 @@ mod tests {
         let cfg = Config {
             ipv4: None,
             mount_point: "",
+            record_mode: RecordMode::Both,
             port: 554,
             width: 640,
             height: 480,
@@ -1138,6 +1217,7 @@ mod tests {
         let base = |width, height, fps| Config {
             ipv4: None,
             mount_point: "",
+            record_mode: RecordMode::Both,
             port: 554,
             width,
             height,
@@ -1171,6 +1251,7 @@ mod tests {
         let base = |jpeg_quality| Config {
             ipv4: None,
             mount_point: "",
+            record_mode: RecordMode::Both,
             port: 554,
             width: 640,
             height: 480,
@@ -1230,5 +1311,50 @@ mod tests {
         assert_eq!(cfg.sda_io_num, sys::gpio_num_t_GPIO_NUM_40);
         assert_eq!(cfg.scl_io_num, sys::gpio_num_t_GPIO_NUM_39);
         assert_eq!(cfg.flags.enable_internal_pullup(), 1);
+    }
+
+    fn mode_config(record_mode: RecordMode, mount_point: &'static str) -> Config<'static> {
+        Config {
+            ipv4: None,
+            mount_point,
+            record_mode,
+            port: 554,
+            width: 640,
+            height: 480,
+            fps: 10,
+            jpeg_quality: 12,
+            audio_sample_rate: 0,
+            audio_bitrate: 0,
+        }
+    }
+
+    #[test]
+    fn record_mode_selects_the_attached_consumers() {
+        assert_eq!(RecordMode::default(), RecordMode::Both);
+
+        assert!(RecordMode::Both.records());
+        assert!(RecordMode::Both.streams());
+        assert!(!RecordMode::Stream.records());
+        assert!(RecordMode::Stream.streams());
+        assert!(RecordMode::Record.records());
+        assert!(!RecordMode::Record.streams());
+    }
+
+    #[test]
+    fn mode_predicates_bound_the_attached_consumers() {
+        let unmounted = mode_config(RecordMode::Both, "");
+        assert!(!wants_recording(&unmounted));
+
+        let stream_only = mode_config(RecordMode::Stream, "/sdcard");
+        assert!(!wants_recording(&stream_only));
+        assert!(wants_stream(&stream_only));
+
+        for mode in [RecordMode::Both, RecordMode::Record] {
+            let mounted = mode_config(mode, "/sdcard");
+            assert_eq!(wants_recording(&mounted), AVI_RECORDING);
+        }
+        assert!(wants_stream(&mode_config(RecordMode::Both, "/sdcard")));
+        assert!(wants_stream(&mode_config(RecordMode::Stream, "/sdcard")));
+        assert!(!wants_stream(&mode_config(RecordMode::Record, "/sdcard")));
     }
 }

@@ -15,6 +15,14 @@ use settings::*;
 const RTSP_PORT: u16 = 554;
 
 pub fn run() -> ! {
+    if !RECORD_MODE_IS_KNOWN {
+        logging::log!(
+            "boot: WARNING: RECORD_MODE={:?} is not one of both|stream|record; using {}",
+            RECORD_MODE_VALUE.unwrap_or(""),
+            RECORD_MODE.as_str()
+        );
+    }
+
     if let Err(error) = net::ensure_netif_initialised() {
         logging::log!("boot: WARNING: netif initialization failed: {error}");
     }
@@ -104,26 +112,33 @@ pub fn run() -> ! {
     let ipv4 = station_ip.map(|ip| ip.to_string());
     let address = ipv4.as_deref().unwrap_or("0.0.0.0");
 
-    // The status document reports whether this boot records. The pipeline wires
-    // the muxer under exactly this condition (feature on and a card mounted),
-    // and it is known before the pipeline starts, which is when the server is
-    // given the fact.
-    let recording_enabled = cfg!(feature = "avi-recording") && !mount_point.is_empty();
+    // The status document reports whether this boot records and streams. The
+    // pipeline applies the same `RECORD_MODE` and mount predicate, and it is
+    // known before the pipeline starts, which is when the server is given it.
+    let recording_enabled =
+        cfg!(feature = "avi-recording") && !mount_point.is_empty() && RECORD_MODE.records();
+    let rtsp_running = RECORD_MODE.streams();
     let fileserver_port = FILE_SERVER_PORT as u16;
     let _fileserver = fileserver::start(fileserver::Config {
         port: fileserver_port,
         mount_point: storage::BASE_PATH,
         rtsp_port: RTSP_PORT,
         rtsp_path: "/live",
-        rtsp_running: true,
+        rtsp_running,
         recording_enabled,
     })
     .map_err(|error| logging::log!("boot: WARNING: fileserver unavailable: {error}"))
     .ok();
 
+    let media_record_mode = match RECORD_MODE {
+        settings::RecordMode::Both => media::RecordMode::Both,
+        settings::RecordMode::Stream => media::RecordMode::Stream,
+        settings::RecordMode::Record => media::RecordMode::Record,
+    };
     let media_config = media::Config {
         ipv4: ipv4.as_deref(),
         mount_point,
+        record_mode: media_record_mode,
         port: RTSP_PORT,
         width: VIDEO_WIDTH,
         height: VIDEO_HEIGHT,

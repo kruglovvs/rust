@@ -9,7 +9,7 @@
 #[path = "../../firmware/src/settings.rs"]
 mod settings;
 
-use settings::parse_u32;
+use settings::{parse_record_mode, parse_u32, record_mode_is_known, RecordMode};
 
 /// Stand-in for a capture-geometry default (`VIDEO_WIDTH`).
 const DEFAULT: u32 = 640;
@@ -53,4 +53,52 @@ fn zero_falls_back_to_default() {
 #[test]
 fn absent_value_falls_back_to_default() {
     assert_eq!(parse_u32(None, DEFAULT), DEFAULT);
+}
+
+#[test]
+fn record_mode_defaults_to_both() {
+    assert_eq!(parse_record_mode(None), RecordMode::Both);
+    assert_eq!(RecordMode::default(), RecordMode::Both);
+}
+
+#[test]
+fn record_mode_accepts_every_documented_spelling_case_insensitively() {
+    assert_eq!(parse_record_mode(Some("both")), RecordMode::Both);
+    assert_eq!(parse_record_mode(Some("BOTH")), RecordMode::Both);
+    assert_eq!(parse_record_mode(Some("BoTh")), RecordMode::Both);
+    assert_eq!(parse_record_mode(Some("stream")), RecordMode::Stream);
+    assert_eq!(parse_record_mode(Some("Stream")), RecordMode::Stream);
+    assert_eq!(parse_record_mode(Some("record")), RecordMode::Record);
+    assert_eq!(parse_record_mode(Some("RECORD")), RecordMode::Record);
+}
+
+#[test]
+fn unknown_record_mode_falls_back_to_both_and_is_detectable() {
+    // A typo must select the documented default and stay visible to the boot
+    // path so it can log a warning instead of being silently ignored.
+    assert_eq!(parse_record_mode(Some("bogus")), RecordMode::Both);
+    assert!(!record_mode_is_known(Some("bogus")));
+    assert!(!record_mode_is_known(Some("")));
+    assert!(!record_mode_is_known(Some(" both")));
+}
+
+#[test]
+fn absent_record_mode_is_known_but_never_warns() {
+    assert!(record_mode_is_known(None));
+    for value in ["both", "stream", "record"] {
+        assert!(
+            record_mode_is_known(Some(value)),
+            "{value} must be recognised"
+        );
+    }
+}
+
+#[test]
+fn record_mode_reports_which_consumers_attach() {
+    assert!(RecordMode::Both.records() && RecordMode::Both.streams());
+    assert!(RecordMode::Stream.streams() && !RecordMode::Stream.records());
+    assert!(RecordMode::Record.records() && !RecordMode::Record.streams());
+    assert_eq!(RecordMode::Both.as_str(), "both");
+    assert_eq!(RecordMode::Stream.as_str(), "stream");
+    assert_eq!(RecordMode::Record.as_str(), "record");
 }

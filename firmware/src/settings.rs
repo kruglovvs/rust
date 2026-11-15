@@ -17,6 +17,10 @@
 //!   non-empty decimal number greater than zero that fits in `u32`; a leading
 //!   `+` is allowed; whitespace is not trimmed. Everything else falls back to
 //!   the supplied default.
+//! - [`parse_record_mode`] resolves `RECORD_MODE` (`both`, `stream`, `record`)
+//!   case-insensitively, and [`record_mode_is_known`] reports whether the
+//!   supplied text named a mode, so the boot path can warn on a typo instead
+//!   of silently ignoring it.
 //!
 //! The module is pure (no `esp_idf_*` imports, no allocation), so the host
 //! harness `#[path]`-includes it and tests it without a device.
@@ -61,6 +65,97 @@ pub const fn parse_u32(value: Option<&str>, default: u32) -> u32 {
     if parsed == 0 { default } else { parsed }
 }
 
+/// Which consumers the boot pipeline attaches to the capture service.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RecordMode {
+    /// AVI muxer and RTSP both attached. The default.
+    #[default]
+    Both,
+    /// RTSP only: no muxer service is created, linked or started.
+    Stream,
+    /// AVI muxer only: RTSP is not linked or started.
+    Record,
+}
+
+impl RecordMode {
+    /// Stable name used in logs and in the `RECORD_MODE` knob.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RecordMode::Both => "both",
+            RecordMode::Stream => "stream",
+            RecordMode::Record => "record",
+        }
+    }
+
+    /// Whether the AVI muxer sink is attached in this mode.
+    pub const fn records(self) -> bool {
+        matches!(self, RecordMode::Both | RecordMode::Record)
+    }
+
+    /// Whether the RTSP server is attached in this mode.
+    pub const fn streams(self) -> bool {
+        matches!(self, RecordMode::Both | RecordMode::Stream)
+    }
+}
+
+const fn ascii_lower(byte: u8) -> u8 {
+    if byte >= b'A' && byte <= b'Z' {
+        byte + (b'a' - b'A')
+    } else {
+        byte
+    }
+}
+
+const fn equals_ignore_ascii_case(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if ascii_lower(left[index]) != ascii_lower(right[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Resolve the `RECORD_MODE` knob, falling back to [`RecordMode::Both`].
+///
+/// Matching is case-insensitive and the value is not trimmed. A missing,
+/// empty, or unknown value selects the default; use [`record_mode_is_known`]
+/// to tell an absent knob (fine) from a typo (worth a warning).
+pub const fn parse_record_mode(value: Option<&str>) -> RecordMode {
+    let text = match value {
+        Some(text) => text,
+        None => return RecordMode::Both,
+    };
+    if equals_ignore_ascii_case(text, "both") {
+        RecordMode::Both
+    } else if equals_ignore_ascii_case(text, "stream") {
+        RecordMode::Stream
+    } else if equals_ignore_ascii_case(text, "record") {
+        RecordMode::Record
+    } else {
+        RecordMode::Both
+    }
+}
+
+/// Whether `value` names a mode. An absent knob is known (it opts into the
+/// default); an empty or unrecognised string is not.
+pub const fn record_mode_is_known(value: Option<&str>) -> bool {
+    match value {
+        None => true,
+        Some(text) => {
+            equals_ignore_ascii_case(text, "both")
+                || equals_ignore_ascii_case(text, "stream")
+                || equals_ignore_ascii_case(text, "record")
+        }
+    }
+}
+
 /// Clamp a JPEG quality knob to the range the sensor driver accepts.
 const fn clamp_jpeg_quality(value: u32) -> u32 {
     if value > JPEG_QUALITY_MAX {
@@ -81,6 +176,14 @@ pub const AUDIO_BITRATE: u32 = parse_u32(option_env!("AUDIO_BITRATE"), 64_000);
 // place and a build without it still gets the documented default.
 #[allow(dead_code)]
 pub const FILE_SERVER_PORT: u32 = parse_u32(option_env!("FILE_SERVER_PORT"), 80);
+
+/// Raw `RECORD_MODE` text, absent unless the build was handed one.
+pub const RECORD_MODE_VALUE: Option<&str> = option_env!("RECORD_MODE");
+/// Effective consumer split for this build (`both`, `stream`, or `record`).
+pub const RECORD_MODE: RecordMode = parse_record_mode(RECORD_MODE_VALUE);
+/// Whether [`RECORD_MODE_VALUE`] named a mode; false means the default was
+/// substituted because of a typo or an empty value.
+pub const RECORD_MODE_IS_KNOWN: bool = record_mode_is_known(RECORD_MODE_VALUE);
 
 /// Station SSID, absent unless the build was handed one (never committed).
 pub const WIFI_SSID: Option<&str> = option_env!("WIFI_SSID");

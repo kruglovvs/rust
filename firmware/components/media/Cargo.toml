@@ -16,6 +16,6 @@ logging = { path = "../logging" }
 # deliberately has no extra-component metadata of its own.
 
 [features]
-# Link the AVI muxer sink. Off by default: its global-cache read
-# currently starves the RTSP video sink.
+# Link the AVI muxer sink. On by default through the firmware's `default`
+# features; this feature is the compile-time kill switch.
 avi-recording = []

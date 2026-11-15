@@ -29,6 +29,9 @@ media = { path = "components/media" }
 fileserver = { path = "components/fileserver" }
 
 [features]
+# Recording is on by default. `--no-default-features` is the compile-time kill
+# switch: it drops `media/avi-recording` and no muxer code is linked.
+default = ["avi-recording"]
 avi-recording = ["media/avi-recording"]
 # Boot-time on-device RTSP self-check against 127.0.0.1 (diagnostics only).
 rtsp-selftest = []
