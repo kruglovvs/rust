@@ -46,6 +46,14 @@ pub fn emit_link_args(key: &str, args: &[String]) {
 #[allow(dead_code)] // the firmware crate only calls forward_link_args/emit
 pub fn forward_and_emit_link_args() {
     println!("cargo:rerun-if-changed=../../build_support.rs");
+    // Component test binaries mount the SD card (`cargo test --no-run -p
+    // storage` builds its own image), so they need the same CMD5/CMD6
+    // interposer the app gets. `cargo::rustc-link-arg` only applies to the
+    // emitting package, and `firmware/build.rs` therefore cannot pass it down:
+    // each component must emit it for its own targets. The app keeps its
+    // single emission in `firmware/build.rs` and never calls this function, so
+    // its link line still has exactly one `--wrap`.
+    println!("cargo::rustc-link-arg=-Wl,--wrap=sdspi_host_do_transaction");
     match forward_link_args() {
         Some((key, args)) => emit_link_args(&key, &args),
         None => println!(
