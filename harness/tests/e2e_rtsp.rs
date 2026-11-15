@@ -33,10 +33,13 @@
 //!
 //! # What is asserted (when live)
 //!
-//! - SDP contains the plan-locked lines `a=rtpmap:0 PCMU/8000` and
-//!   `a=rtpmap:26 JPEG/90000`.
+//! - The DESCRIBE SDP parses into media sections offering the codecs the
+//!   pipeline emits: MJPEG video on payload type 26 (`JPEG/90000`) and AAC-LC
+//!   audio on payload type 97 (`MPEG4-GENERIC/48000/1`). The live test asserts
+//!   on the parsed `(payload type, encoding, clock rate, channels)` tuples, so
+//!   a codec change fails with the offered tuples printed.
 //! - Over 10 s of TCP-interleaved RTP: ≥ 90 video frames (RTP marker-bit
-//!   boundaries) and ≥ 450 audio frames (PCMU packets).
+//!   boundaries) and ≥ 450 AAC audio packets.
 //! - A/V start delta ≤ 250 ms, measured from the arrival instant of each
 //!   track's first RTP packet.
 //!
@@ -64,7 +67,8 @@ use std::time::{Duration, Instant};
 const CAPTURE_SECS: u64 = 10;
 /// Required video frames in [`CAPTURE_SECS`]: 9 fps × 10 s.
 const MIN_VIDEO_FRAMES: u32 = 90;
-/// Required audio frames in [`CAPTURE_SECS`]: 50 PCMU packets/s × 10 s.
+/// Required audio frames in [`CAPTURE_SECS`]: AAC at 48 kHz carries 1024
+/// samples per frame (~46.9 frames/s), so 10 s yields ~469 packets.
 const MIN_AUDIO_FRAMES: u32 = 450;
 /// Allowed start skew between the first video and first audio RTP packet.
 const MAX_AV_START_DELTA_MS: u128 = 250;
@@ -76,10 +80,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const NEGATIVE_TEST_BOUND: Duration = Duration::from_secs(10);
 /// Refuse to buffer an unbounded RTSP message.
 const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
-
-/// The two SDP codec strings the plan locks (Todo 11 / Todo 15).
-const SDP_AUDIO_RTPMAP: &str = "a=rtpmap:0 PCMU/8000";
-const SDP_VIDEO_RTPMAP: &str = "a=rtpmap:26 JPEG/90000";
 
 // ---- Errors ---------------------------------------------------------------
 
@@ -403,26 +403,201 @@ enum TrackKind {
     Audio,
 }
 
+impl TrackKind {
+    fn label(self) -> &'static str {
+        match self {
+            TrackKind::Video => "video",
+            TrackKind::Audio => "audio",
+        }
+    }
+}
+
+/// One parsed `a=rtpmap` line: `(payload type, encoding, clock rate, channels)`.
+///
+/// The encoding is upper-cased so `mpeg4-generic` and `MPEG4-GENERIC` compare
+/// equal; `channels` is `None` when the rtpmap carries only `<encoding>/<rate>`.
+type Codec = (u8, String, u32, Option<u8>);
+
+/// The codec contract the media pipeline emits
+/// (`firmware/components/media/src/lib.rs`): MJPEG video on payload type 26 at
+/// a 90 kHz clock, and AAC-LC (`MPEG4-GENERIC`) on the dynamic payload type 97
+/// at 48 kHz mono.
+const EXPECTED_VIDEO_CODEC: (u8, &str, u32, Option<u8>) = (26, "JPEG", 90_000, None);
+const EXPECTED_AUDIO_CODEC: (u8, &str, u32, Option<u8>) = (97, "MPEG4-GENERIC", 48_000, Some(1));
+
+/// One `m=` media section with the codecs it advertises and its `a=control` URL.
+#[derive(Debug)]
+struct MediaSection {
+    /// The raw `m=` line, quoted in parse errors so a failure names the section.
+    header: String,
+    kind: TrackKind,
+    control: Option<String>,
+    codecs: Vec<Codec>,
+}
+
 #[derive(Debug)]
 struct Track {
     kind: TrackKind,
     control: String,
-    payload_type: u8,
+    codec: Codec,
 }
 
-fn validate_sdp(sdp: &str) -> Result<(), ClientError> {
-    let has = |wanted: &str| sdp.lines().any(|line| line.trim_end() == wanted);
-    if !has(SDP_VIDEO_RTPMAP) {
+fn parse_sdp_sections(sdp: &str) -> Result<Vec<MediaSection>, ClientError> {
+    let mut sections = Vec::new();
+    let mut current: Option<MediaSection> = None;
+
+    for line in sdp.lines() {
+        let line = line.trim_end();
+        if let Some(rest) = line.strip_prefix("m=") {
+            if let Some(section) = current.take() {
+                push_section(section, &mut sections)?;
+            }
+            let kind = match rest.split_whitespace().next() {
+                Some("video") => Some(TrackKind::Video),
+                Some("audio") => Some(TrackKind::Audio),
+                _ => None,
+            };
+            current = kind.map(|kind| MediaSection {
+                header: format!("m={rest}"),
+                kind,
+                control: None,
+                codecs: Vec::new(),
+            });
+        } else if let Some(rest) = line.strip_prefix("a=rtpmap:") {
+            if let Some(section) = current.as_mut() {
+                let codec = parse_rtpmap(rest, &section.header)?;
+                section.codecs.push(codec);
+            }
+        } else if let Some(rest) = line.strip_prefix("a=control:") {
+            if let Some(section) = current.as_mut() {
+                let control = rest.trim();
+                if !control.is_empty() && control != "*" {
+                    section.control = Some(control.to_string());
+                }
+            }
+        }
+    }
+    if let Some(section) = current.take() {
+        push_section(section, &mut sections)?;
+    }
+    Ok(sections)
+}
+
+fn push_section(
+    section: MediaSection,
+    sections: &mut Vec<MediaSection>,
+) -> Result<(), ClientError> {
+    if section.codecs.is_empty() {
         return Err(ClientError::Protocol(format!(
-            "SDP is missing the locked video line {SDP_VIDEO_RTPMAP:?}\n--- SDP ---\n{sdp}"
+            "SDP media section {:?} has no a=rtpmap line; cannot identify its codec",
+            section.header
         )));
     }
-    if !has(SDP_AUDIO_RTPMAP) {
-        return Err(ClientError::Protocol(format!(
-            "SDP is missing the locked audio line {SDP_AUDIO_RTPMAP:?}\n--- SDP ---\n{sdp}"
-        )));
-    }
+    sections.push(section);
     Ok(())
+}
+
+fn parse_rtpmap(value: &str, section_header: &str) -> Result<Codec, ClientError> {
+    let malformed = |detail: &str| {
+        ClientError::Protocol(format!(
+            "SDP media section {section_header:?} has a malformed a=rtpmap line \
+             {value:?}: {detail}"
+        ))
+    };
+
+    let mut parts = value.split_whitespace();
+    let payload_type = parts
+        .next()
+        .ok_or_else(|| malformed("missing payload type"))?
+        .parse::<u8>()
+        .map_err(|_| malformed("payload type is not an 8-bit number"))?;
+    let encoding_and_clock = parts
+        .next()
+        .ok_or_else(|| malformed("missing <encoding>/<clock-rate>"))?;
+    let mut fields = encoding_and_clock.split('/');
+    let encoding = fields.next().unwrap_or("");
+    if encoding.is_empty() {
+        return Err(malformed("empty encoding name"));
+    }
+    let clock_rate = fields
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .ok_or_else(|| malformed("clock rate is missing or not a number"))?;
+    let channels = match fields.next() {
+        Some(s) => Some(
+            s.parse::<u8>()
+                .map_err(|_| malformed("channel count is not an 8-bit number"))?,
+        ),
+        None => None,
+    };
+    Ok((
+        payload_type,
+        encoding.to_ascii_uppercase(),
+        clock_rate,
+        channels,
+    ))
+}
+
+fn codec_matches(codec: &Codec, expected: (u8, &str, u32, Option<u8>)) -> bool {
+    let (payload_type, encoding, clock_rate, channels) = expected;
+    codec.0 == payload_type
+        && codec.1.eq_ignore_ascii_case(encoding)
+        && codec.2 == clock_rate
+        && codec.3 == channels
+}
+
+fn describe_codec(codec: &Codec) -> String {
+    let (payload_type, encoding, clock_rate, channels) = codec;
+    match channels {
+        Some(channels) => format!("{encoding}/{clock_rate}/{channels} (PT {payload_type})"),
+        None => format!("{encoding}/{clock_rate} (PT {payload_type})"),
+    }
+}
+
+fn select_track(
+    sections: &[MediaSection],
+    kind: TrackKind,
+    expected: (u8, &str, u32, Option<u8>),
+    base: &RtspUrl,
+) -> Result<Track, ClientError> {
+    let section = sections
+        .iter()
+        .find(|section| section.kind == kind)
+        .ok_or_else(|| {
+            ClientError::Protocol(format!("SDP has no {} media section", kind.label()))
+        })?;
+    let codec = section
+        .codecs
+        .iter()
+        .find(|codec| codec_matches(codec, expected))
+        .ok_or_else(|| {
+            let offered = section
+                .codecs
+                .iter()
+                .map(describe_codec)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let expected =
+                describe_codec(&(expected.0, expected.1.to_string(), expected.2, expected.3));
+            ClientError::Protocol(format!(
+                "SDP {} section {:?} does not advertise the expected codec \
+                 {expected}; it offers {offered}",
+                kind.label(),
+                section.header
+            ))
+        })?;
+    let control = section.control.as_ref().ok_or_else(|| {
+        ClientError::Protocol(format!(
+            "SDP {} section {:?} has no usable a=control URL",
+            kind.label(),
+            section.header
+        ))
+    })?;
+    Ok(Track {
+        kind,
+        control: resolve_control(base, control),
+        codec: codec.clone(),
+    })
 }
 
 fn resolve_control(base: &RtspUrl, control: &str) -> String {
@@ -436,68 +611,11 @@ fn resolve_control(base: &RtspUrl, control: &str) -> String {
 }
 
 fn parse_tracks(sdp: &str, base: &RtspUrl) -> Result<Vec<Track>, ClientError> {
-    let mut tracks = Vec::new();
-    let mut current: Option<(TrackKind, u8, Option<u8>)> = None;
-
-    for line in sdp.lines() {
-        if let Some(rest) = line.strip_prefix("m=") {
-            let fields: Vec<&str> = rest.split_whitespace().collect();
-            let kind = match fields.first().copied() {
-                Some("video") => TrackKind::Video,
-                Some("audio") => TrackKind::Audio,
-                _ => {
-                    current = None;
-                    continue;
-                }
-            };
-            let default_payload_type = fields
-                .get(3)
-                .and_then(|s| s.parse::<u8>().ok())
-                .ok_or_else(|| {
-                    ClientError::Protocol(format!("cannot parse payload type from SDP line {line:?}"))
-                })?;
-            current = Some((kind, default_payload_type, None));
-        } else if let Some(rest) = line.strip_prefix("a=rtpmap:") {
-            if let Some((kind, _default_pt, preferred)) = current.as_mut() {
-                let mut parts = rest.split_whitespace();
-                let pt = parts.next().and_then(|s| s.parse::<u8>().ok());
-                let encoding = parts.next().and_then(|s| s.split('/').next());
-                if let (Some(pt), Some(encoding)) = (pt, encoding) {
-                    let matches_kind = match kind {
-                        TrackKind::Audio => encoding.eq_ignore_ascii_case("PCMU"),
-                        TrackKind::Video => encoding.eq_ignore_ascii_case("JPEG"),
-                    };
-                    if matches_kind {
-                        *preferred = Some(pt);
-                    }
-                }
-            }
-        } else if let Some(control) = line.strip_prefix("a=control:") {
-            if let Some((kind, default_pt, preferred)) = current.take() {
-                let control = control.trim();
-                if control.is_empty() || control == "*" {
-                    continue;
-                }
-                tracks.push(Track {
-                    kind,
-                    control: resolve_control(base, control),
-                    payload_type: preferred.unwrap_or(default_pt),
-                });
-            }
-        }
-    }
-
-    if !tracks.iter().any(|t| t.kind == TrackKind::Video) {
-        return Err(ClientError::Protocol(
-            "SDP has no video track with an a=control URL".into(),
-        ));
-    }
-    if !tracks.iter().any(|t| t.kind == TrackKind::Audio) {
-        return Err(ClientError::Protocol(
-            "SDP has no audio track with an a=control URL".into(),
-        ));
-    }
-    Ok(tracks)
+    let sections = parse_sdp_sections(sdp)?;
+    Ok(vec![
+        select_track(&sections, TrackKind::Video, EXPECTED_VIDEO_CODEC, base)?,
+        select_track(&sections, TrackKind::Audio, EXPECTED_AUDIO_CODEC, base)?,
+    ])
 }
 
 /// Parse `interleaved=a-b` out of a `Transport:` response value.
@@ -540,9 +658,15 @@ fn run_live(url: &str) -> Result<StreamStats, ClientError> {
     let resp = client.request("DESCRIBE", &base_uri, &[("Accept", "application/sdp")])?;
     expect_ok(&resp, "DESCRIBE")?;
     let sdp = String::from_utf8_lossy(&resp.body).into_owned();
-    validate_sdp(&sdp)?;
-    println!("DESCRIBE SDP carries both locked rtpmap lines");
     let tracks = parse_tracks(&sdp, &client.url)?;
+    for track in &tracks {
+        println!(
+            "DESCRIBE SDP {} track: {:?} control {}",
+            track.kind.label(),
+            track.codec,
+            track.control
+        );
+    }
 
     // SETUP each track over TCP interleaved. The server reassigns channels per
     // track (video 0/1, audio 2/3), so read them back from the response.
@@ -572,26 +696,13 @@ fn run_live(url: &str) -> Result<StreamStats, ClientError> {
             ))
         })?;
         match track.kind {
-            TrackKind::Video => {
-                assert_eq!(
-                    track.payload_type, 26,
-                    "video track payload type must be JPEG/26, SDP said {}",
-                    track.payload_type
-                );
-                video_channel = Some(rtp);
-            }
-            TrackKind::Audio => {
-                assert_eq!(
-                    track.payload_type, 0,
-                    "audio track payload type must be PCMU/0, SDP said {}",
-                    track.payload_type
-                );
-                audio_channel = Some(rtp);
-            }
+            TrackKind::Video => video_channel = Some(rtp),
+            TrackKind::Audio => audio_channel = Some(rtp),
         }
         println!(
-            "SETUP {:?} ok (rtp channel {rtp}, session {})",
-            track.kind,
+            "SETUP {} {:?} ok (rtp channel {rtp}, session {})",
+            track.kind.label(),
+            track.codec,
             session.as_deref().unwrap_or("?")
         );
     }
@@ -671,12 +782,9 @@ fn live_rtsp_stream_meets_frame_and_av_thresholds() {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {
             println!(
-                "SKIP e2e_rtsp: ESP32_RTSP_URL is not set (or empty) — this live test needs a \
-                 running board.\n\
+                "SKIP: ESP32_RTSP_URL not set — this live test needs a running board.\n\
                  Run it with:\n  ESP32_RTSP_URL=rtsp://<board-ip>:554/live \\\n      \
-                 cargo test --test e2e_rtsp -- --nocapture\n\
-                 Note: live execution is currently blocked because the board's camera returns \
-                 no frames and its SD mount fails; see the file header."
+                 cargo test --test e2e_rtsp -- --nocapture"
             );
             return;
         }
@@ -797,4 +905,117 @@ fn http_content_is_rejected_with_a_clear_diagnostic() {
         "wrong-content failure must be bounded, took {elapsed:?}"
     );
     println!("wrong-content diagnostic after {elapsed:?}: {message}");
+}
+
+#[cfg(test)]
+mod sdp_parsing {
+    use super::*;
+
+    /// SDP captured from the board's RTSP server: audio first (AAC-LC 48 kHz
+    /// mono on PT 97), then MJPEG on PT 26.
+    const DEVICE_SDP: &str = "v=0\r\n\
+        o=Z 0 3 IN IP4 192.168.1.33\r\n\
+        s=Z\r\n\
+        c=IN IP4 192.168.1.33\r\n\
+        t=0 0\r\n\
+        m=audio 0 RTP/AVP 97\r\n\
+        a=rtpmap:97 MPEG4-GENERIC/48000/1\r\n\
+        a=fmtp:97 mode=AAC-hbr; indexlength=3; sizelength=13; config=1188; streamtype=5\r\n\
+        a=control:track0\r\n\
+        m=video 0 RTP/AVP 26\r\n\
+        a=rtpmap:26 JPEG/90000\r\n\
+        a=control:track1\r\n";
+
+    #[test]
+    fn parses_the_device_sdp_into_codec_tuples() {
+        let sections = parse_sdp_sections(DEVICE_SDP).expect("device SDP must parse");
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].kind, TrackKind::Audio);
+        assert_eq!(
+            sections[0].codecs,
+            vec![(97, "MPEG4-GENERIC".to_string(), 48_000, Some(1))]
+        );
+        assert_eq!(sections[1].kind, TrackKind::Video);
+        assert_eq!(
+            sections[1].codecs,
+            vec![(26, "JPEG".to_string(), 90_000, None)]
+        );
+
+        let base = RtspUrl::parse("rtsp://192.168.1.33:554/live").expect("valid base URL");
+        let tracks =
+            parse_tracks(DEVICE_SDP, &base).expect("device tracks must match the contract");
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(
+            tracks[0].control, "rtsp://192.168.1.33:554/live/track1",
+            "video control resolves against the stream path"
+        );
+        assert!(codec_matches(&tracks[0].codec, EXPECTED_VIDEO_CODEC));
+        assert_eq!(
+            tracks[1].control, "rtsp://192.168.1.33:554/live/track0",
+            "audio control resolves against the stream path"
+        );
+        assert!(codec_matches(&tracks[1].codec, EXPECTED_AUDIO_CODEC));
+    }
+
+    #[test]
+    fn pcmu_sdp_does_not_masquerade_as_the_aac_track() {
+        let pcmu = "v=0\r\n\
+            m=audio 0 RTP/AVP 0\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=control:track0\r\n";
+        let sections = parse_sdp_sections(pcmu).expect("PCMU SDP must parse");
+        assert_eq!(
+            sections[0].codecs,
+            vec![(0, "PCMU".to_string(), 8_000, None)]
+        );
+        assert!(!codec_matches(&sections[0].codecs[0], EXPECTED_AUDIO_CODEC));
+        assert!(!codec_matches(&sections[0].codecs[0], EXPECTED_VIDEO_CODEC));
+
+        let base = RtspUrl::parse("rtsp://127.0.0.1:554/live").expect("valid base URL");
+        let error = select_track(&sections, TrackKind::Audio, EXPECTED_AUDIO_CODEC, &base)
+            .expect_err("PCMU must not satisfy the AAC contract");
+        let message = error.to_string();
+        assert!(
+            message.contains("MPEG4-GENERIC/48000/1 (PT 97)"),
+            "error must name the expected AAC tuple: {message}"
+        );
+        assert!(
+            message.contains("PCMU/8000 (PT 0)"),
+            "error must name the offered PCMU tuple: {message}"
+        );
+    }
+
+    #[test]
+    fn rtpmap_encoding_is_normalised_to_upper_case() {
+        let sdp = "m=audio 0 RTP/AVP 97\r\n\
+            a=rtpmap:97 mpeg4-generic/48000/1\r\n\
+            a=control:track0\r\n";
+        let sections = parse_sdp_sections(sdp).expect("lowercase rtpmap must parse");
+        assert_eq!(
+            sections[0].codecs[0],
+            (97, "MPEG4-GENERIC".to_string(), 48_000, Some(1))
+        );
+    }
+
+    #[test]
+    fn media_section_without_rtpmap_is_a_typed_error_naming_the_section() {
+        let sdp = "v=0\r\n\
+            m=video 0 RTP/AVP 26\r\n\
+            a=control:track1\r\n";
+        let error =
+            parse_sdp_sections(sdp).expect_err("a media section without a=rtpmap must be rejected");
+        match &error {
+            ClientError::Protocol(message) => {
+                assert!(
+                    message.contains("\"m=video 0 RTP/AVP 26\""),
+                    "error must quote the offending section: {message}"
+                );
+                assert!(
+                    message.contains("no a=rtpmap line"),
+                    "error must explain the missing rtpmap: {message}"
+                );
+            }
+            other => panic!("expected a protocol error, got {other:?}"),
+        }
+    }
 }
