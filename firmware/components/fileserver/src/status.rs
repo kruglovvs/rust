@@ -28,6 +28,12 @@
 //!   means the VFS has the volume.
 //! - `clock_khz` from `sdmmc_host_get_real_freq` on the SDSPI host slot
 //!   (`SPI2_HOST`, the slot `SDSPI_HOST_DEFAULT` selects), `0` with no card.
+//!   The call is made only when the volume is mounted: the host state it reads
+//!   does not exist before a successful mount, and reaching it on a card-less
+//!   boot is a `LoadProhibited` fault. Every other `esp_*`/`sdmmc_*` call here
+//!   is safe on a card-less boot: `esp_vfs_fat_info` reports an error that
+//!   becomes `(0, 0)`, and the timer, heap and temperature accessors do not
+//!   touch the card.
 //! - `recording_file` from [`newest_recording`] below `<mount>/rec`.
 //! - `temperature_c` from the on-die temperature sensor with one decimal;
 //!   `None` only when install, enable or read fails at runtime.
@@ -88,6 +94,8 @@ pub struct Status {
 /// data.
 pub fn gather(cfg: &Config) -> Status {
     let mount = cfg.mount_point;
+    let mounted = std::fs::read_dir(mount).is_ok();
+    let (total_bytes, free_bytes) = volume_info(mount);
     let (temperature_c, temperature_sensor) = read_temperature();
     Status {
         snapshot: Snapshot {
@@ -96,10 +104,10 @@ pub fn gather(cfg: &Config) -> Status {
             uptime_s: uptime_seconds(),
             ip: leak(format_ip(net::station_ipv4())),
             hostname: HOSTNAME,
-            mounted: std::fs::read_dir(mount).is_ok(),
-            total_bytes: volume_info(mount).0,
-            free_bytes: volume_info(mount).1,
-            clock_khz: sd_clock_khz(),
+            mounted,
+            total_bytes,
+            free_bytes,
+            clock_khz: sd_clock_khz(mounted),
             rtsp_port: cfg.rtsp_port,
             rtsp_path: RTSP_PATH,
             rtsp_running: cfg.rtsp_running,
@@ -236,8 +244,18 @@ fn volume_info(mount: &str) -> (u64, u64) {
     }
 }
 
-/// The real SD SPI clock in kHz, or `0` when the host has no card.
-fn sd_clock_khz() -> u64 {
+/// The real SD SPI clock in kHz, or `0` when no volume is mounted.
+///
+/// `sdmmc_host_get_real_freq` dereferences the SDMMC host state, which only
+/// exists after a successful mount has initialised a card on the slot. On a
+/// card-less boot that state was never created and the call faults
+/// (`LoadProhibited` in `sdmmc_ll_get_clock_div`), so it must not be reached.
+/// `mounted` is the same precondition the volume size and recording fields
+/// use; without it the document reports `0`, which is the truth.
+fn sd_clock_khz(mounted: bool) -> u64 {
+    if !mounted {
+        return 0;
+    }
     let mut real_freq_khz: std::ffi::c_int = 0;
     // SAFETY: the slot constant is the one `SDSPI_HOST_DEFAULT` selects on
     // this chip, and the out pointer is valid for one write.
@@ -346,6 +364,55 @@ mod tests {
             format_ip(Some(std::net::Ipv4Addr::new(192, 168, 1, 50))),
             "192.168.1.50"
         );
+    }
+
+    #[test]
+    fn sd_clock_khz_is_zero_without_a_mounted_volume() {
+        // On a card-less boot the SDSPI host slot was never initialised;
+        // calling the driver there is the Guru Meditation (LoadProhibited) this
+        // guard exists to prevent. A `false` precondition must short-circuit
+        // before any `sdmmc_*` call, which this assertion proves on the device:
+        // if the FFI ran, the binary would fault instead of returning.
+        assert_eq!(sd_clock_khz(false), 0);
+    }
+
+    #[test]
+    fn unmounted_status_renders_zero_storage_fields() {
+        let unmounted = Snapshot {
+            version: VERSION,
+            build: BUILD,
+            uptime_s: 0,
+            ip: "0.0.0.0",
+            hostname: HOSTNAME,
+            mounted: false,
+            total_bytes: 0,
+            free_bytes: 0,
+            clock_khz: sd_clock_khz(false),
+            rtsp_port: 554,
+            rtsp_path: RTSP_PATH,
+            rtsp_running: false,
+            recording_enabled: false,
+            recording_file: None,
+            temperature_c: None,
+            heap_internal_free: 0,
+            heap_spiram_free: 0,
+        };
+        let mut body = String::new();
+        crate::json::status_body(&unmounted, &mut body);
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+        assert_eq!(value["mounted"], false);
+        for name in ["total_bytes", "free_bytes", "clock_khz"] {
+            let field = value
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} must be present, not omitted"));
+            assert_eq!(*field, 0, "{name} renders 0 without a mounted volume");
+            assert!(
+                field.is_number(),
+                "{name} stays a JSON number when unmounted"
+            );
+        }
+        assert!(value["recording_file"].is_null());
     }
 
     #[test]
