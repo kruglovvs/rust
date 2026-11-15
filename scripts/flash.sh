@@ -7,6 +7,11 @@
 # actually takes effect.
 #
 # Usage: scripts/flash.sh [PORT]
+#
+# The build goes through build-firmware.sh, the single entry point that sets up
+# the esp toolchain and forwards the Wi-Fi credentials from the gitignored
+# `.env`. A bare `cargo build` here would compile `option_env!("WIFI_SSID")` as
+# `None` and flash firmware that never joins the network.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,7 +20,7 @@ target="${CARGO_TARGET_DIR:-$fw/target}"
 art="$target/xtensa-esp32s3-espidf/debug"
 port="${1:-/dev/ttyACM0}"
 
-(cd "$fw" && cargo build --target xtensa-esp32s3-espidf)
+"$root/scripts/build-firmware.sh"
 
 exec espflash flash --non-interactive --port "$port" \
   --partition-table "$art/partition-table.bin" \
