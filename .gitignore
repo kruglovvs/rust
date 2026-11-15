@@ -9,8 +9,10 @@ harness/artifacts/
 *.bak.*
 
 # Local secrets (the template is committed)
+.env
 .env.*
 !.env.template
+!.env.example
 
 # Planning / agent scratch (never committed per plan commit strategy)
 .omo/
