@@ -53,11 +53,10 @@ const MIC_DIN_GPIO: i32 = 41;
 const SCCB_SDA_GPIO: i32 = 40;
 /// Camera SCCB SCL pin.
 const SCCB_SCL_GPIO: i32 = 39;
-/// Audio sample rate. AAC is used instead of G.711 so the mic can run at a
-/// wideband rate (G.711 is fixed at 8 kHz / 64 kb/s by RFC 3551).
-const AUDIO_SAMPLE_RATE_HZ: u32 = 48_000;
-/// AAC-LC mono bitrate.
-const AUDIO_BITRATE_BPS: u32 = 64_000;
+/// Audio sample rate used when the caller leaves it at zero.
+pub const DEFAULT_AUDIO_SAMPLE_RATE_HZ: u32 = 48_000;
+/// AAC-LC mono bitrate used when the caller leaves it at zero.
+pub const DEFAULT_AUDIO_BITRATE_BPS: u32 = 64_000;
 /// AVI muxer aligned internal-RAM write cache (16 KiB, as recommended).
 const MUXER_RAM_CACHE: u32 = 16 * 1024;
 
@@ -80,6 +79,10 @@ pub struct Config<'a> {
     pub fps: u32,
     /// JPEG quality passed to the sensor, 0-63 (lower is better quality).
     pub jpeg_quality: u32,
+    /// AAC sample rate; 0 uses [`DEFAULT_AUDIO_SAMPLE_RATE_HZ`].
+    pub audio_sample_rate: u32,
+    /// AAC bitrate; 0 uses [`DEFAULT_AUDIO_BITRATE_BPS`].
+    pub audio_bitrate: u32,
 }
 
 impl Config<'_> {
@@ -96,6 +99,9 @@ impl Config<'_> {
         }
         if self.jpeg_quality > 63 {
             return Err(Error::InvalidConfig("jpeg_quality must be in 0..=63"));
+        }
+        if !matches!(self.audio_sample_rate, 0 | 8_000 | 16_000 | 22_050 | 24_000 | 32_000 | 44_100 | 48_000) {
+            return Err(Error::InvalidConfig("audio_sample_rate must be a standard rate"));
         }
         Ok(())
     }
@@ -255,17 +261,27 @@ fn video_track_info(cfg: &Config<'_>) -> gmf::esp_media_track_info_t {
 }
 
 /// Build the AAC track description.
-fn audio_track_info() -> gmf::esp_media_track_info_t {
+fn audio_track_info(cfg: &Config<'_>) -> gmf::esp_media_track_info_t {
+    let sample_rate = if cfg.audio_sample_rate == 0 {
+        DEFAULT_AUDIO_SAMPLE_RATE_HZ
+    } else {
+        cfg.audio_sample_rate
+    };
+    let bitrate = if cfg.audio_bitrate == 0 {
+        DEFAULT_AUDIO_BITRATE_BPS
+    } else {
+        cfg.audio_bitrate
+    };
     gmf::esp_media_track_info_t {
         id: 2,
         type_: gmf::esp_media_track_type_t_ESP_MEDIA_TRACK_TYPE_AUDIO,
         info: gmf::esp_media_track_info_t__bindgen_ty_1 {
             audio: gmf::esp_media_audio_info_t {
                 codec: gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_AAC as u32,
-                sample_rate: AUDIO_SAMPLE_RATE_HZ,
+                sample_rate,
                 bits_per_sample: 16,
                 channel: 1,
-                bitrate: AUDIO_BITRATE_BPS,
+                bitrate,
             },
         },
     }
@@ -759,7 +775,7 @@ mod ffi {
             unsafe { gmf::esp_capture_service_setup_add_track(setup, DEFAULT_STREAM, &video_track) };
         check(code, Step::CaptureTrackVideo)?;
 
-        let audio_track = audio_track_info();
+        let audio_track = audio_track_info(cfg);
         let code =
             unsafe { gmf::esp_capture_service_setup_add_track(setup, DEFAULT_STREAM, &audio_track) };
         check(code, Step::CaptureTrackAudio)?;
@@ -1078,6 +1094,8 @@ mod tests {
             height: 480,
             fps: 15,
             jpeg_quality: 12,
+            audio_sample_rate: 0,
+            audio_bitrate: 0,
         };
         let track = video_track_info(&cfg);
         let video = unsafe { track.info.video };
@@ -1092,7 +1110,18 @@ mod tests {
 
     #[test]
     fn audio_track_is_wideband_aac() {
-        let track = audio_track_info();
+        let cfg = Config {
+            ipv4: None,
+            mount_point: "",
+            port: 554,
+            width: 640,
+            height: 480,
+            fps: 10,
+            jpeg_quality: 12,
+            audio_sample_rate: 0,
+            audio_bitrate: 0,
+        };
+        let track = audio_track_info(&cfg);
         let audio = unsafe { track.info.audio };
         assert_eq!(
             audio.codec,
@@ -1114,6 +1143,8 @@ mod tests {
             height,
             fps,
             jpeg_quality: 12,
+            audio_sample_rate: 0,
+            audio_bitrate: 0,
         };
         assert!(base(320, 240, 10).validate().is_ok());
         assert!(base(640, 480, 10).validate().is_ok());
@@ -1145,6 +1176,8 @@ mod tests {
             height: 480,
             fps: 10,
             jpeg_quality,
+            audio_sample_rate: 0,
+            audio_bitrate: 0,
         };
         assert!(base(0).validate().is_ok());
         assert!(base(12).validate().is_ok());

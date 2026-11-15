@@ -91,6 +91,7 @@ fn live_stream_matches_the_configured_geometry() {
         min_duration: 5.0,
         audio_codec: audio_codec.clone(),
         audio_rate,
+        require_audio: true,
     };
     let _outcome = report(&out, &options).expect("analysis");
 

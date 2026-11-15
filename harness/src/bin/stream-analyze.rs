@@ -20,6 +20,10 @@ fn main() {
     };
     let mut options = Options::default();
     while let Some(flag) = args.next() {
+        if flag == "--no-require-audio" {
+            options.require_audio = false;
+            continue;
+        }
         let Some(value) = args.next() else {
             eprintln!("{flag} needs a value");
             std::process::exit(2);

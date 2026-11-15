@@ -110,6 +110,8 @@ pub fn run() -> ! {
         height: VIDEO_HEIGHT,
         fps: VIDEO_FPS,
         jpeg_quality: VIDEO_JPEG_QUALITY,
+        audio_sample_rate: AUDIO_SAMPLE_RATE,
+        audio_bitrate: AUDIO_BITRATE,
     };
     let pipeline = match media::Pipeline::start(&media_config) {
         Ok(pipeline) => Some(pipeline),

@@ -38,8 +38,7 @@ rtsp-selftest = []
 esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
 
 [profile.release]
-# Speed over size: the pipeline is JPEG/resample-bound, and the debug build
-# (opt-level 0) was what every measurement used before.
-opt-level = 3
-lto = "thin"
-codegen-units = 1
+# Speed optimised, size aware. `opt-level = 3` deadlocked cargo on this
+# dependency graph (futex wait, no compiler active), so use "s": still fully
+# optimised, and it keeps the image inside the 4 MiB app partition.
+opt-level = "s"

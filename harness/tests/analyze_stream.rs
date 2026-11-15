@@ -69,6 +69,7 @@ fn options() -> Options {
         min_duration: 55.0,
         audio_codec: "pcm_mulaw".to_string(),
         audio_rate: 8_000,
+        require_audio: true,
     }
 }
 
@@ -132,4 +133,56 @@ fn analyzer_rejects_audio_rate_mismatch() {
         "expected the duration check to fail, got {:?}",
         outcome.failed
     );
+}
+
+#[test]
+fn audio_stats_separate_noise_from_signal() {
+    if !(have("ffmpeg") && have("ffprobe")) {
+        eprintln!("SKIP: ffmpeg/ffprobe is not installed");
+        return;
+    }
+    // A 1 kHz tone scaled to roughly a quarter of full scale (about -12 dBFS
+    // at the sine peak before mu-law, -33 dBFS RMS after the codec).
+    // Alternating 0.5 s loud / 0.5 s quiet tone blocks, concatenated: the
+    // level changes frame to frame, which is what lets the analyser separate
+    // "signal" (99.9th percentile) from "noise floor" (10th).
+    let dir = build_clip(
+        "analyzer-noise",
+        "aevalsrc='if(lt(mod(t,1),0.5),0.25,0.002)*sin(2*PI*1000*t)':s=8000:d=60",
+        "60",
+    );
+    let outcome = analyze(&dir);
+    let metrics = std::fs::read_to_string(dir.join("metrics.json")).expect("metrics.json");
+    let level = metrics
+        .split("\"audio_level\": {")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("audio_level block");
+
+    let field = |name: &str| -> f64 {
+        level
+            .split(&format!("\"{name}\": "))
+            .nth(1)
+            .and_then(|rest| rest.split(|c| c == ',' || c == '}').next())
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_else(|| panic!("missing {name} in {level}"))
+    };
+
+    let rms = field("rms_db");
+    let peak = field("peak_db");
+    let crest = field("crest_db");
+    let snr = field("snr_db");
+    let noise = field("noise_db");
+    let clipping = field("clipped_fraction");
+
+    // 50% duty cycle between 0.25 and 0.002 full scale: the overall RMS lands
+    // between the two block levels.
+    assert!((-50.0..=-10.0).contains(&rms), "rms {rms} should be a mid-level tone");
+    assert!(peak > rms, "peak {peak} must exceed rms {rms}");
+    assert!(crest > 0.0, "crest {crest} must be positive");
+    // 0.25 to 0.002 full scale is about 42 dB, so the two levels must separate.
+    assert!(snr > 20.0, "loud and quiet halves should separate, got {snr} dB SNR");
+    assert!(noise < rms, "noise floor {noise} must sit below the signal {rms}");
+    assert!(clipping < 0.001, "a -12 dBFS tone must not clip, got {clipping}");
+    assert_eq!(outcome.verdict, Verdict::Pass, "failed: {:?}", outcome.failed);
 }
