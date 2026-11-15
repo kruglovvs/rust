@@ -102,10 +102,25 @@ pub fn run() -> ! {
         None => logging::log!("boot: WARNING: no station IP after 60s; starting pipeline anyway"),
     }
     let ipv4 = station_ip.map(|ip| ip.to_string());
-    match ipv4.as_deref() {
-        Some(ip) => logging::log!("boot: RTSP advertising {ip}:{RTSP_PORT}"),
-        None => logging::log!("boot: WARNING: station IP unavailable; RTSP advertises 0.0.0.0"),
-    }
+    let address = ipv4.as_deref().unwrap_or("0.0.0.0");
+
+    // The status document reports whether this boot records. The pipeline wires
+    // the muxer under exactly this condition (feature on and a card mounted),
+    // and it is known before the pipeline starts, which is when the server is
+    // given the fact.
+    let recording_enabled = cfg!(feature = "avi-recording") && !mount_point.is_empty();
+    let fileserver_port = FILE_SERVER_PORT as u16;
+    let _fileserver = fileserver::start(fileserver::Config {
+        port: fileserver_port,
+        mount_point: storage::BASE_PATH,
+        rtsp_port: RTSP_PORT,
+        rtsp_path: "/live",
+        rtsp_running: true,
+        recording_enabled,
+    })
+    .map_err(|error| logging::log!("boot: WARNING: fileserver unavailable: {error}"))
+    .ok();
+
     let media_config = media::Config {
         ipv4: ipv4.as_deref(),
         mount_point,
@@ -124,20 +139,14 @@ pub fn run() -> ! {
             None
         }
     };
-    logging::log!("boot: A after pipeline");
-
     let recording = pipeline.as_ref().is_some_and(|pipeline| pipeline.recording());
-    logging::log!("boot: B recording={recording}");
-
     let audio = pipeline.as_ref().is_some_and(|pipeline| pipeline.audio());
-    logging::log!("boot: C audio={audio}");
-
-    let rtsp = pipeline.as_ref().is_some_and(|pipeline| pipeline.rtsp());
-    logging::log!("boot: D rtsp={rtsp}");
 
     logging::log!(
-        "boot: ready recording={recording} audio={audio} rtsp={rtsp} \
-         capture={VIDEO_WIDTH}x{VIDEO_HEIGHT}@{VIDEO_FPS}fps q={VIDEO_JPEG_QUALITY}"
+        "boot: ready rtsp=rtsp://{address}:{RTSP_PORT}/live http=http://{address}:{fileserver_port}/ \
+         recording={} audio={} capture={VIDEO_WIDTH}x{VIDEO_HEIGHT}@{VIDEO_FPS}fps",
+        on_off(recording),
+        on_off(audio)
     );
 
     #[cfg(feature = "rtsp-selftest")]
@@ -166,6 +175,14 @@ pub fn run() -> ! {
     #[cfg(not(feature = "rtsp-selftest"))]
     loop {
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
     }
 }
 
