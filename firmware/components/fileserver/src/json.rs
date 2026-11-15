@@ -1,20 +1,24 @@
-//! JSON bodies: the status snapshot, the API index and the embedded OpenAPI
-//! document.
+//! JSON bodies: the status snapshot, the API index, the recording listing and
+//! the embedded OpenAPI document.
 //!
 //! # Contract
 //!
 //! ```text
 //! pub struct Snapshot<'a> { pub version: &'a str, pub build: &'a str, ... }
+//! pub const LIST_CAP: usize = 200;
 //! pub fn status_body(snapshot: &Snapshot<'_>, out: &mut String)
 //! pub fn index_body(out: &mut String)
+//! pub fn list_body(dir: &str, source: &dyn FileSource, out: &mut String, cap: usize)
 //! pub fn error_body(status: Status, message: &str, out: &mut String)
 //! pub fn openapi_body() -> &'static str
 //! ```
 //!
-//! Every function here is pure and host/device agnostic: this module never
-//! imports `esp_idf_*` and never touches the card. [`crate::status`] is the
-//! only module that reads a device and fills a [`Snapshot`]; the builders
-//! below are what the device test binary exercises directly.
+//! Every function here is pure apart from the [`crate::body::FileSource`] the
+//! listing reads through: this module never imports `esp_idf_*` and never
+//! touches the card itself. [`crate::status`] is the only module that reads a
+//! device and fills a [`Snapshot`], and [`crate::body::CardSource`] is the only
+//! source the server passes in; the builders below are what the device test
+//! binary exercises directly.
 //!
 //! [`status_body`] appends one JSON object to `out` whose property names are
 //! exactly the `components.schemas.Status` properties of the embedded
@@ -35,11 +39,27 @@
 //! [`error_body`] appends `{"error":"<reason>","message":"<message>"}`, the
 //! `ApiError` shape documented for every non-2xx JSON response.
 //!
+//! [`list_body`] appends `{"files":[{"path":"/rec/REC_0001.avi","size":123456}]}`
+//! for the files directly inside `dir`, a mount-relative directory (`""` for
+//! the card root). It reads the entries and sizes through the
+//! [`crate::body::FileSource`] rather than the card, skips directories, and
+//! takes each `size` from `source.len`, so the number a client sees is the
+//! number of bytes a download of that `path` would send. Entries are sorted by
+//! name and the list is cut at `cap.min(`[`LIST_CAP`]`)`: the caller's ceiling
+//! can lower the documented 200 but never raise it. Each `path` is
+//! mount-relative with a leading slash - the form the download route takes
+//! without the slash - so the mount itself never appears in the API. A
+//! directory that cannot be read is written as an empty list, because a card
+//! without the directory yet and an unreadable one look the same to a client
+//! that is only listing; an entry that fails its size lookup is skipped for
+//! the same reason.
+//!
 //! [`openapi_body`] returns the checked-in `/firmware/api/openapi.json`
 //! verbatim: it is compiled into the image with `include_str!`, so the
 //! document the device serves is byte-identical to the one the host contract
 //! test validates. No HTML is ever produced by this module.
 
+use crate::body::{DirEntry, FileSource};
 use crate::http::Status;
 use crate::router::ROUTES;
 
@@ -51,6 +71,9 @@ pub const HOSTNAME: &str = "esp32s3-av";
 
 /// The firmware crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Most entries a listing reports, whatever the caller asks for.
+pub const LIST_CAP: usize = 200;
 
 /// The build profile the image was compiled with.
 pub const BUILD: &str = if cfg!(debug_assertions) {
@@ -125,6 +148,34 @@ pub fn index_body(out: &mut String) {
         .collect();
     let body = serde_json::json!({ "endpoints": endpoints });
     out.push_str(&body.to_string());
+}
+
+/// Append the recording listing for `dir` to `out`, at most `cap` entries.
+pub fn list_body(dir: &str, source: &dyn FileSource, out: &mut String, cap: usize) {
+    let limit = cap.min(LIST_CAP);
+    let mut entries: std::vec::Vec<DirEntry> = source.list(dir).unwrap_or_default();
+    entries.retain(|entry| !entry.is_dir);
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries.truncate(limit);
+
+    let files: std::vec::Vec<serde_json::Value> = entries
+        .iter()
+        .filter_map(|entry| {
+            let rel = child_path(dir, &entry.name);
+            let size = source.len(&rel).ok()?;
+            Some(serde_json::json!({ "path": format!("/{rel}"), "size": size }))
+        })
+        .collect();
+    let body = serde_json::json!({ "files": files });
+    out.push_str(&body.to_string());
+}
+
+fn child_path(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
 }
 
 /// Append the documented error body for `status` to `out`.
@@ -409,5 +460,166 @@ mod tests {
         assert!(RTSP_PATH.starts_with('/'));
         assert!(!VERSION.is_empty());
         assert!(!BUILD.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod list {
+    use super::*;
+    use crate::body::{FileSource, MemorySource};
+
+    const SMALL: [u8; 222] = [7; 222];
+    const BIG: [u8; 123_456] = [9; 123_456];
+    const TINY: [u8; 1] = [1; 1];
+
+    fn body_of(dir: &str, files: &[(&str, &[u8])], cap: usize) -> serde_json::Value {
+        let source = MemorySource::new(files);
+        let mut out = std::string::String::new();
+        list_body(dir, &source, &mut out, cap);
+        serde_json::from_str(&out).expect("the listing is valid JSON")
+    }
+
+    fn paths(value: &serde_json::Value) -> Vec<std::string::String> {
+        value["files"]
+            .as_array()
+            .expect("files array")
+            .iter()
+            .map(|entry| {
+                entry["path"]
+                    .as_str()
+                    .expect("path is a string")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn list_empty_dir() {
+        let value = body_of("rec", &[], LIST_CAP);
+        assert_eq!(value["files"], serde_json::json!([]));
+        assert_eq!(paths(&value).len(), 0);
+    }
+
+    #[test]
+    fn list_sorts_by_name() {
+        let files = [
+            ("rec/REC_0003.avi", &SMALL[..]),
+            ("rec/REC_0001.avi", &SMALL[..]),
+            ("rec/REC_0002.avi", &SMALL[..]),
+        ];
+        let value = body_of("rec", &files, LIST_CAP);
+        assert_eq!(
+            paths(&value),
+            vec![
+                "/rec/REC_0001.avi",
+                "/rec/REC_0002.avi",
+                "/rec/REC_0003.avi"
+            ]
+        );
+    }
+
+    #[test]
+    fn list_skips_directories() {
+        let files = [
+            ("rec/REC_0001.avi", &SMALL[..]),
+            ("rec/raw/REC_0009.avi", &BIG[..]),
+        ];
+        let value = body_of("rec", &files, LIST_CAP);
+        assert_eq!(paths(&value), vec!["/rec/REC_0001.avi"]);
+        assert!(
+            !value.to_string().contains("raw"),
+            "a directory is skipped, not listed as a file: {value}"
+        );
+    }
+
+    #[test]
+    fn list_respects_cap() {
+        assert_eq!(LIST_CAP, 200);
+        let names: Vec<std::string::String> =
+            (0..250).map(|index| format!("rec/REC_{index:04}.avi")).collect();
+        let data = [0u8; 8];
+        let files: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|name| (name.as_str(), &data[..]))
+            .collect();
+
+        let listed = paths(&body_of("rec", &files, LIST_CAP));
+        assert_eq!(listed.len(), 200, "the documented ceiling is 200");
+        assert_eq!(listed.first().map(String::as_str), Some("/rec/REC_0000.avi"));
+        assert_eq!(listed.last().map(String::as_str), Some("/rec/REC_0199.avi"));
+
+        assert_eq!(paths(&body_of("rec", &files, 5)).len(), 5, "cap lowers");
+        assert_eq!(
+            paths(&body_of("rec", &files, 500)).len(),
+            200,
+            "cap cannot raise the ceiling"
+        );
+    }
+
+    #[test]
+    fn list_uses_forward_slashes() {
+        let files = [("rec/REC_0001.avi", &SMALL[..])];
+        let value = body_of("rec", &files, LIST_CAP);
+        assert_eq!(paths(&value), vec!["/rec/REC_0001.avi"]);
+        let text = value.to_string();
+        assert!(
+            !text.contains('\\'),
+            "listing paths never use a backslash: {text}"
+        );
+    }
+
+    #[test]
+    fn list_size_matches_source() {
+        let files = [("rec/SMALL.avi", &SMALL[..]), ("rec/BIG.avi", &BIG[..])];
+        let source = MemorySource::new(&files);
+        let mut out = std::string::String::new();
+        list_body("rec", &source, &mut out, LIST_CAP);
+        let value: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+
+        let mut reported = Vec::new();
+        for entry in value["files"].as_array().expect("files array") {
+            let path = entry["path"].as_str().expect("path");
+            let rel = path.strip_prefix('/').expect("mount-relative with a slash");
+            let size = entry["size"].as_u64().expect("size is an integer");
+            let served = source.len(rel).expect("the source serves the listed path");
+            reported.push((path.to_string(), size, served));
+        }
+        assert_eq!(
+            reported,
+            vec![
+                (
+                    "/rec/BIG.avi".to_string(),
+                    BIG.len() as u64,
+                    BIG.len() as u64
+                ),
+                (
+                    "/rec/SMALL.avi".to_string(),
+                    SMALL.len() as u64,
+                    SMALL.len() as u64
+                ),
+            ],
+            "the listing size is the number of bytes a download sends"
+        );
+    }
+
+    #[test]
+    fn list_path_is_mount_relative() {
+        let files = [("rec/REC_0001.avi", &TINY[..])];
+        let value = body_of("rec", &files, LIST_CAP);
+        let path = &paths(&value)[0];
+        assert_eq!(path, "/rec/REC_0001.avi");
+        assert!(
+            !path.contains("/sdcard"),
+            "the mount is not part of the API path: {path}"
+        );
+        assert_eq!(
+            &path[1..],
+            "rec/REC_0001.avi",
+            "the download route takes the path without the slash"
+        );
+
+        // A root-level file lists with the same leading slash.
+        let root = body_of("", &[("LOOSE.avi", &TINY[..])], LIST_CAP);
+        assert_eq!(paths(&root), vec!["/LOOSE.avi"]);
     }
 }
