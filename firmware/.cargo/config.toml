@@ -27,3 +27,17 @@ ESP_IDF_SYS_EXTRA_COMPONENTS_FILE = "/workspaces/rust/firmware/camera-extra.toml
 # Uncomment this if you have moved the target dir by setting CARGO_TARGET_DIR or similar.
 # Required for now due to embuild limitations.
 ESP_IDF_SYS_ROOT_CRATE = "esp32s3-av-firmware"
+
+# Firmware build knobs (non-secret), read by `src/settings.rs` with
+# `option_env!`. Cargo exports this table to build scripts and rustc, so a plain
+# `cargo build` resolves every knob without a `.env` file. An exported value
+# still wins unless the entry says `force = true`, which keeps
+# `VIDEO_WIDTH=320 ./scripts/build-firmware.sh` working as an override.
+# Wi-Fi credentials are NOT here: they are secrets and arrive from the shell.
+VIDEO_WIDTH = "640"
+VIDEO_HEIGHT = "480"
+VIDEO_FPS = "10"
+VIDEO_JPEG_QUALITY = "12"
+AUDIO_SAMPLE_RATE = "48000"
+AUDIO_BITRATE = "64000"
+FILE_SERVER_PORT = "80"

@@ -6,7 +6,11 @@ use esp_idf_hal::peripherals::Peripherals;
 use net::{self, NetConfig, WifiCredentials};
 use storage::{self, Storage};
 
-include!(concat!(env!("OUT_DIR"), "/build_settings.rs"));
+// `settings.rs` sits beside this file, and a `mod` declared inside `app.rs`
+// would otherwise be looked up under `src/app/settings.rs`.
+#[path = "settings.rs"]
+mod settings;
+use settings::*;
 
 const RTSP_PORT: u16 = 554;
 

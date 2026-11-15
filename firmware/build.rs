@@ -22,9 +22,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=../.env");
-    write_wifi_credentials();
-    let jpeg_quality = read_knob("VIDEO_JPEG_QUALITY", 12).min(63);
+    warn_missing_wifi_credentials();
+    // The knob is a C-source patch input, not a Rust constant: `settings.rs`
+    // resolves the same variable with `option_env!` for the app.
+    println!("cargo:rerun-if-env-changed=VIDEO_JPEG_QUALITY");
+    let jpeg_quality = env::var("VIDEO_JPEG_QUALITY")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(12)
+        .min(63);
     patch_fatfs_exfat();
 
     // ESP-IDF 5.5.2 `sdmmc_card_init` always issues the SDIO CMD5 probe
@@ -193,19 +200,21 @@ fn patch_esp32_camera_soi_dump(link_args: &[String]) {
     }
 }
 
-/// Read a numeric knob: environment first, then `.env`, then the default.
-fn read_knob(key: &str, default: u32) -> u32 {
-    println!("cargo:rerun-if-env-changed={key}");
-    let from_env = env::var(key).ok().and_then(|value| value.parse::<u32>().ok());
-    if let Some(value) = from_env {
-        return value;
+/// Warn when the build has no Wi-Fi credentials to embed.
+///
+/// Credentials are secrets: `scripts/build-firmware.sh` sources the gitignored
+/// `.env` and forwards them, and they are deliberately absent from
+/// `.cargo/config.toml`. A build without them is valid - the firmware boots
+/// without a network - so this is a warning, never an error.
+fn warn_missing_wifi_credentials() {
+    println!("cargo:rerun-if-env-changed=WIFI_SSID");
+    println!("cargo:rerun-if-env-changed=WIFI_PASSWORD");
+    if env::var_os("WIFI_SSID").is_none() || env::var_os("WIFI_PASSWORD").is_none() {
+        println!(
+            "cargo:warning=firmware: WIFI_SSID/WIFI_PASSWORD not set - the build will boot \
+             without Wi-Fi"
+        );
     }
-    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default();
-    let env_path = Path::new(&manifest_dir).join("../.env");
-    fs::read_to_string(env_path)
-        .ok()
-        .and_then(|contents| parse_settings(&contents).get(key).copied())
-        .unwrap_or(default)
 }
 
 /// Replace esp_capture's hard-coded JPEG quality with the configured value.
@@ -491,99 +500,4 @@ fn shlex_split(input: &str) -> Vec<String> {
         tokens.push(current);
     }
     tokens
-}
-
-fn write_wifi_credentials() {
-    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap();
-    let env_path = Path::new(&manifest_dir).join("../.env");
-    let contents = fs::read_to_string(&env_path).unwrap_or_default();
-    println!("cargo:rerun-if-changed={}", env_path.display());
-    let (ssid, password) = parse_wifi_credentials(&contents);
-    let settings = parse_settings(&contents);
-
-    // A process environment variable wins over .env so a one-off build can
-    // override the committed defaults without editing the file.
-    let knob = |key: &str, default: u32| {
-        println!("cargo:rerun-if-env-changed={key}");
-        env::var(key)
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .or_else(|| settings.get(key).copied())
-            .filter(|value| *value > 0)
-            .unwrap_or(default)
-    };
-    let width = knob("VIDEO_WIDTH", 640);
-    let height = knob("VIDEO_HEIGHT", 480);
-    let fps = knob("VIDEO_FPS", 10);
-    let jpeg_quality = knob("VIDEO_JPEG_QUALITY", 12).min(63);
-    let audio_bitrate = knob("AUDIO_BITRATE", 64_000);
-    let audio_rate = knob("AUDIO_SAMPLE_RATE", 48_000);
-
-    let generated = format!(
-        "pub const WIFI_SSID: Option<&str> = {}\n;\
-         pub const WIFI_PASSWORD: Option<&str> = {};\n\
-         pub const VIDEO_WIDTH: u32 = {width};\n\
-         pub const VIDEO_HEIGHT: u32 = {height};\n\
-         pub const VIDEO_FPS: u32 = {fps};\n\
-         pub const VIDEO_JPEG_QUALITY: u32 = {jpeg_quality};\n\
-         pub const AUDIO_BITRATE: u32 = {audio_bitrate};\n\
-         pub const AUDIO_SAMPLE_RATE: u32 = {audio_rate};\n",
-        rust_option(ssid.as_deref()),
-        rust_option(password.as_deref())
-    );
-    let out_dir = env::var_os("OUT_DIR").unwrap();
-    fs::write(Path::new(&out_dir).join("build_settings.rs"), generated).unwrap();
-}
-
-/// Parse `KEY=value` lines into numeric settings, ignoring the Wi-Fi keys and
-/// anything that does not parse as an unsigned integer.
-fn parse_settings(contents: &str) -> std::collections::HashMap<String, u32> {
-    contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(|line| line.split_once('='))
-        .filter_map(|(key, value)| {
-            value
-                .trim()
-                .parse::<u32>()
-                .ok()
-                .map(|value| (key.trim().to_string(), value))
-        })
-        .collect()
-}
-
-fn parse_wifi_credentials(contents: &str) -> (Option<String>, Option<String>) {
-    let mut ssid = None;
-    let mut password = None;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .or_else(|| {
-                value
-                    .strip_prefix('\'')
-                    .and_then(|value| value.strip_suffix('\''))
-            })
-            .unwrap_or(value)
-            .to_owned();
-        match key.trim() {
-            "WIFI_SSID" => ssid = Some(value),
-            "WIFI_PASSWORD" => password = Some(value),
-            _ => {}
-        }
-    }
-    (ssid, password)
-}
-
-fn rust_option(value: Option<&str>) -> String {
-    value.map_or_else(|| "None".to_owned(), |value| format!("Some({value:?})"))
 }
