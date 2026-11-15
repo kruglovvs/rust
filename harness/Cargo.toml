@@ -18,9 +18,24 @@ path = "tests/task14_net.rs"
 name = "e2e_rtsp"
 path = "tests/e2e_rtsp.rs"
 
+# Todo 16: one assertion set over two drivers - the crate's pure router/JSON
+# code in-process, and the live board over a plain TCP socket. The OpenAPI
+# schema check uses the same two crates the plan pins.
+[[test]]
+name = "api_contract"
+path = "tests/api_contract.rs"
+
 # Stream-quality analyser: dependency-free Rust over ffprobe/ffmpeg.
 [[bin]]
 name = "stream-analyze"
 path = "src/bin/stream-analyze.rs"
 
 [dependencies]
+
+[dev-dependencies]
+# OpenAPI 3.0.x document model (the shipped document is 3.0.3).
+openapiv3 = "2.2"
+# JSON Schema validation; default-features off drops reqwest/rustls, so the
+# harness still needs no network stack beyond `std`.
+jsonschema = { version = "0.61", default-features = false }
+serde_json = "1"
