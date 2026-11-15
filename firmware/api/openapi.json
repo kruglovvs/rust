@@ -1,0 +1,416 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "esp32s3-av firmware API",
+    "version": "1.0.0",
+    "description": "Read-only JSON API of the ESP32-S3 audio/video firmware: device status, the SD-card recording listing, the OpenAPI document itself, and byte-range file download. No HTML, no UI, no upload. The API is unauthenticated and intended for the local network only. Every JSON body is `application/json`; the only non-JSON body is the recording file itself, served as `application/octet-stream` with `Accept-Ranges: bytes`. `temperature_c` is a reading of the on-die ESP32-S3 temperature sensor reported with one decimal; it is `null` when the sensor could not be installed, enabled or read at runtime, which is a sensor failure and not a permanently documented limitation."
+  },
+  "servers": [
+    {
+      "url": "http://esp32s3-av.local",
+      "description": "mDNS name the firmware advertises on the station interface"
+    },
+    {
+      "url": "http://192.168.1.50",
+      "description": "Example station address; read the boot log for the real one"
+    }
+  ],
+  "tags": [
+    { "name": "status", "description": "Device state without touching the card" },
+    { "name": "files", "description": "Recordings on the mounted SD card" },
+    { "name": "meta", "description": "The API's own description" }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "API index",
+        "description": "Returns the machine-readable list of endpoints. This is never an HTML page.",
+        "operationId": "getIndex",
+        "responses": {
+          "200": {
+            "description": "Every endpoint the server answers, as method/path pairs.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Index" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "tags": ["status"],
+        "summary": "Device status document",
+        "description": "Firmware identity, uptime, station address, heap, SD-card volume and clock, RTSP configuration, recording state, the newest recording and the internal temperature sensor reading. Answered without reading a file from the card, so it stays responsive while a download is in progress.",
+        "operationId": "getStatus",
+        "responses": {
+          "200": {
+            "description": "The status document. Every property is always present; `recording_file` and `temperature_c` are nullable.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Status" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/files": {
+      "get": {
+        "tags": ["files"],
+        "summary": "List recordings",
+        "description": "Lists the entries below the `/rec` directory of the mounted card, sorted by name, at most 200 entries, one directory level deep. `path` is mount-relative with a leading slash; download it from `/api/v1/files/{path}` without that slash.",
+        "operationId": "listFiles",
+        "responses": {
+          "200": {
+            "description": "The recording listing (possibly empty).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FileList" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "This document",
+        "description": "Serves the checked-in OpenAPI 3.0.3 document the running firmware was built with.",
+        "operationId": "getOpenApi",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.0.3 document itself.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "An OpenAPI 3.0.3 document; see this file for the shape."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/files/{path}": {
+      "parameters": [
+        {
+          "name": "path",
+          "in": "path",
+          "required": true,
+          "description": "Mount-relative file path, one or more `/`-separated percent-encoded segments, without a leading slash (for example `rec/REC_0001.avi`). `..`, `.`, empty segments, backslashes and NUL bytes are rejected.",
+          "schema": { "type": "string" },
+          "example": "rec/REC_0001.avi"
+        }
+      ],
+      "get": {
+        "tags": ["files"],
+        "summary": "Download one recording",
+        "description": "Sends the file with an exact `Content-Length` and `Accept-Ranges: bytes`. With a single `Range: bytes=...` header the response is `206 Partial Content` and carries `Content-Range: bytes <start>-<end>/<total>`; a range that selects no byte is `416 Range Not Satisfiable` with `Content-Range: bytes */<total>` and a zero-length body. A multi-range request is ignored and the whole file is sent with `200`, which RFC 9110 section 14.2 permits. The body is streamed in 4 KiB chunks, never buffered whole.",
+        "operationId": "downloadFile",
+        "parameters": [
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "description": "A single byte range, for example `bytes=0-1023`, `bytes=500-` or `bytes=-500`. Malformed or multi-range values are ignored and the whole file is served.",
+            "schema": { "type": "string" },
+            "example": "bytes=0-1023"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The whole file, or the whole file after an ignored range header.",
+            "headers": {
+              "Accept-Ranges": {
+                "description": "Always `bytes`.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "206": {
+            "description": "The requested byte range.",
+            "headers": {
+              "Content-Range": {
+                "description": "`bytes <start>-<end>/<total>`, both bounds inclusive.",
+                "schema": { "type": "string" }
+              },
+              "Accept-Ranges": {
+                "description": "Always `bytes`.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "416": { "$ref": "#/components/responses/RangeNotSatisfiable" }
+        }
+      },
+      "head": {
+        "tags": ["files"],
+        "summary": "Download headers for one recording",
+        "description": "Identical status line and headers to the `GET` operation, with no body.",
+        "operationId": "headFile",
+        "parameters": [
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "description": "A single byte range, same rules as the `GET` operation.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Whole-file headers, no body." },
+          "206": { "description": "Range headers, no body." },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "416": { "$ref": "#/components/responses/RangeNotSatisfiable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Index": {
+        "type": "object",
+        "description": "The machine-readable API index.",
+        "required": ["endpoints"],
+        "properties": {
+          "endpoints": {
+            "type": "array",
+            "description": "Every documented operation, in route-table order.",
+            "items": {
+              "type": "object",
+              "required": ["method", "path", "description"],
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "description": "HTTP method, upper case."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Path pattern as it appears in this document."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "One-line human summary."
+                }
+              }
+            }
+          }
+        }
+      },
+      "Status": {
+        "type": "object",
+        "description": "The device status document.",
+        "required": [
+          "version",
+          "build",
+          "uptime_s",
+          "ip",
+          "hostname",
+          "mounted",
+          "total_bytes",
+          "free_bytes",
+          "clock_khz",
+          "rtsp_port",
+          "rtsp_path",
+          "rtsp_running",
+          "recording_enabled",
+          "recording_file",
+          "temperature_c",
+          "heap_internal_free",
+          "heap_spiram_free"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "Firmware crate version."
+          },
+          "build": {
+            "type": "string",
+            "description": "Build profile the image was compiled with."
+          },
+          "uptime_s": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Seconds since the timer subsystem started."
+          },
+          "ip": {
+            "type": "string",
+            "description": "Station IPv4 address, or `0.0.0.0` before DHCP assigns one."
+          },
+          "hostname": {
+            "type": "string",
+            "description": "mDNS hostname the device advertises; it answers as `<hostname>.local`."
+          },
+          "mounted": {
+            "type": "boolean",
+            "description": "Whether the SD card is mounted at the configured mount point."
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Size of the mounted FAT filesystem in bytes; `0` when not mounted."
+          },
+          "free_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Free bytes on the mounted FAT filesystem; `0` when not mounted."
+          },
+          "clock_khz": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Real SD SPI clock in kHz; `0` when no card is mounted."
+          },
+          "rtsp_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Port the RTSP service is configured for."
+          },
+          "rtsp_path": {
+            "type": "string",
+            "description": "RTSP stream path, always beginning with a slash."
+          },
+          "rtsp_running": {
+            "type": "boolean",
+            "description": "Whether the media pipeline was started for this boot."
+          },
+          "recording_enabled": {
+            "type": "boolean",
+            "description": "Whether AVI recording is configured on for this boot."
+          },
+          "recording_file": {
+            "type": "string",
+            "nullable": true,
+            "description": "Mount-relative path of the newest recording (for example `rec/REC_0002.avi`), or `null` when there is none."
+          },
+          "temperature_c": {
+            "type": "number",
+            "format": "float",
+            "nullable": true,
+            "description": "On-die temperature sensor reading in degrees Celsius with one decimal, or `null` when the sensor is unavailable."
+          },
+          "heap_internal_free": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Free internal SRAM in bytes."
+          },
+          "heap_spiram_free": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Free PSRAM in bytes; `0` on a build without PSRAM."
+          }
+        }
+      },
+      "FileList": {
+        "type": "object",
+        "description": "The recording listing.",
+        "required": ["files"],
+        "properties": {
+          "files": {
+            "type": "array",
+            "description": "Recording entries sorted by name.",
+            "items": {
+              "type": "object",
+              "required": ["path", "size"],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "Mount-relative path with a leading slash."
+                },
+                "size": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0,
+                  "description": "File size in bytes."
+                }
+              }
+            }
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "description": "A JSON error body: every non-2xx JSON response uses this shape.",
+        "required": ["error", "message"],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Canonical reason phrase of the status code (for example `Not Found`)."
+          },
+          "message": {
+            "type": "string",
+            "description": "One-line human detail."
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "The request head could not be parsed.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The requested path is not a safe card path (traversal, absolute path, control byte).",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such route, or no such file.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      },
+      "RangeNotSatisfiable": {
+        "description": "The range selects no byte of the file; the response carries `Content-Range: bytes */<total>` and a zero-length body.",
+        "headers": {
+          "Content-Range": {
+            "description": "`bytes */<total>`.",
+            "schema": { "type": "string" }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      }
+    }
+  }
+}
