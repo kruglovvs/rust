@@ -784,33 +784,28 @@ fn internal_free() -> usize {
     unsafe { sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL) }
 }
 
+/// Plumbing shared by the socket tests (`tests`) and the device HIL tests
+/// (`hil`): one loopback client, one ephemeral-port server, one read-to-close.
 #[cfg(test)]
-mod tests {
+mod support {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
     use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-
-    /// One request for the status endpoint, the cheapest route that needs no card.
-    const STATUS_REQUEST: &[u8] = b"GET /api/v1/status HTTP/1.1\r\nHost: board\r\n\r\n";
-
-    /// The reference extra set [`http::write_head`] formats, used to prove the
-    /// download writer emits the same head.
-    static ACCEPT_RANGES_HEADER: [(&str, &str); 1] = [body::ACCEPT_RANGES];
+    use std::time::Duration;
 
     /// Socket tests share this binary and the board's sixteen-socket pool, so
     /// they run one at a time. A panicking test must not poison the lock for the
     /// rest of the suite.
-    static SOCKETS: Mutex<()> = Mutex::new(());
+    pub(super) static SOCKETS: Mutex<()> = Mutex::new(());
 
-    fn sockets() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn sockets() -> std::sync::MutexGuard<'static, ()> {
         SOCKETS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn test_config(port: u16) -> Config {
+    pub(super) fn test_config(port: u16) -> Config {
         Config {
             port,
             mount_point: storage::BASE_PATH,
@@ -821,7 +816,7 @@ mod tests {
         }
     }
 
-    fn start_on_port_zero() -> Server {
+    pub(super) fn start_on_port_zero() -> Server {
         net::ensure_netif_initialised().expect("LwIP is up before the first socket");
         start(test_config(0)).expect("the server starts on an ephemeral port")
     }
@@ -829,11 +824,11 @@ mod tests {
     /// The address a client on the board reaches the listener on. The listener
     /// binds every interface, so its own address is `0.0.0.0`; LwIP's loopback
     /// netif serves `127.0.0.1`.
-    fn loopback(server: &Server) -> SocketAddr {
+    pub(super) fn loopback(server: &Server) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), server.local_addr().port())
     }
 
-    fn connect(server: &Server) -> TcpStream {
+    pub(super) fn connect(server: &Server) -> TcpStream {
         let stream = TcpStream::connect(loopback(server)).expect("the client connects");
         stream
             .set_read_timeout(Some(Duration::from_secs(20)))
@@ -846,7 +841,7 @@ mod tests {
 
     /// Read until the server closes the one-request connection: the close is the
     /// event every response ends with.
-    fn read_to_close(stream: &mut TcpStream) -> String {
+    pub(super) fn read_to_close_bytes(stream: &mut TcpStream) -> std::vec::Vec<u8> {
         let mut all = std::vec::Vec::new();
         let mut buffer = [0u8; 512];
         loop {
@@ -857,22 +852,54 @@ mod tests {
                 Err(error) => panic!("reading the response failed: {error}"),
             }
         }
-        String::from_utf8(all).expect("the server writes UTF-8 heads and JSON bodies")
+        all
     }
 
-    fn body_of(response: &str) -> &str {
+    pub(super) fn read_to_close(stream: &mut TcpStream) -> String {
+        String::from_utf8(read_to_close_bytes(stream))
+            .expect("the server writes UTF-8 heads and JSON bodies")
+    }
+
+    pub(super) fn request(server: &Server, head: &[u8]) -> std::vec::Vec<u8> {
+        let mut stream = connect(server);
+        stream.write_all(head).expect("the request is written");
+        read_to_close_bytes(&mut stream)
+    }
+
+    pub(super) fn body_of(response: &str) -> &str {
         match response.split_once("\r\n\r\n") {
             Some((_, body)) => body,
             None => "",
         }
     }
 
+    pub(super) fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines().find_map(|line| {
+            let (field, value) = line.split_once(':')?;
+            field
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim_start_matches(' '))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::support::*;
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    /// One request for the status endpoint, the cheapest route that needs no card.
+    const STATUS_REQUEST: &[u8] = b"GET /api/v1/status HTTP/1.1\r\nHost: board\r\n\r\n";
+
+    /// The reference extra set [`http::write_head`] formats, used to prove the
+    /// download writer emits the same head.
+    static ACCEPT_RANGES_HEADER: [(&str, &str); 1] = [body::ACCEPT_RANGES];
+
     fn get_status(server: &Server) -> String {
-        let mut stream = connect(server);
-        stream
-            .write_all(STATUS_REQUEST)
-            .expect("the request is written");
-        read_to_close(&mut stream)
+        String::from_utf8(request(server, STATUS_REQUEST)).expect("the status body is UTF-8 JSON")
     }
 
     /// Wait until every worker slot is taken: a request that still gets `200`
@@ -1139,5 +1166,216 @@ mod tests {
         assert!(partial.contains("Accept-Ranges: bytes\r\n"));
         assert!(partial.contains("Content-Range: bytes 0-511/1024\r\n"));
         assert!(partial.ends_with("Connection: close\r\n\r\n"));
+    }
+}
+
+/// HIL (hardware-in-the-loop) tests: they run in the device test binary, not on
+/// a host substitute.
+///
+/// Every name is `hil_`-prefixed and carries a comment naming the hardware it
+/// needs, because a pass from these is only evidence with the board attached.
+/// They bind port 0, stop their server before asserting, and share
+/// [`support::SOCKETS`] with the socket tests, so libtest's thread order cannot
+/// decide the outcome. The ranged download writes its fixture under the mount
+/// the one-time [`storage::hil_fixture::card`] format provides.
+#[cfg(test)]
+mod hil {
+    use std::io::Write;
+
+    use super::support::*;
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+    const FIXTURE_NAME: &str = "_hil_range.bin";
+    const FIXTURE_BYTES: u64 = 2 * MIB;
+    const RANGE_START: u64 = 524_288;
+    const RANGE_END: u64 = 1_048_575;
+    const RANGE_LEN: u64 = RANGE_END - RANGE_START + 1;
+    const WRITE_CHUNK: usize = 32 * 1024;
+
+    fn pattern_byte(offset: u64) -> u8 {
+        (offset % 251) as u8
+    }
+
+    fn split_head<'a>(response: &'a [u8], endpoint: &str) -> (&'a str, &'a [u8]) {
+        let boundary = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap_or_else(|| panic!("{endpoint}: response has no head terminator"));
+        let head = std::str::from_utf8(&response[..boundary])
+            .unwrap_or_else(|error| panic!("{endpoint}: head is not UTF-8: {error}"));
+        (head, &response[boundary + 4..])
+    }
+
+    fn write_fixture(path: &str) {
+        let mut file = std::fs::File::create(path)
+            .unwrap_or_else(|error| panic!("HIL range fixture: cannot create {path}: {error}"));
+        let mut buffer = std::vec![0u8; WRITE_CHUNK];
+        let mut offset = 0u64;
+        while offset < FIXTURE_BYTES {
+            let len = core::cmp::min(WRITE_CHUNK as u64, FIXTURE_BYTES - offset) as usize;
+            for (index, byte) in buffer[..len].iter_mut().enumerate() {
+                *byte = pattern_byte(offset + index as u64);
+            }
+            if let Err(error) = file.write_all(&buffer[..len]) {
+                let _ = std::fs::remove_file(path);
+                panic!(
+                    "HIL range fixture: write to {path} failed at file offset {offset}: {error}"
+                );
+            }
+            offset += len as u64;
+        }
+        if let Err(error) = file.sync_all() {
+            let _ = std::fs::remove_file(path);
+            panic!("HIL range fixture: sync of {path} failed: {error}");
+        }
+    }
+
+    #[test]
+    fn hil_loopback_status_serves_json() {
+        // HIL: needs the board's LwIP stack and loopback netif; needs no card.
+        let _guard = sockets();
+        net::ensure_netif_initialised().expect("HIL: LwIP initialises before the first socket");
+        let server = start(test_config(0)).expect("HIL: the server starts on an ephemeral port");
+        let endpoint = "/api/v1/status";
+        let response = request(
+            &server,
+            b"GET /api/v1/status HTTP/1.1\r\nHost: board\r\n\r\n",
+        );
+        server.stop();
+
+        let (head, body) = split_head(&response, endpoint);
+        assert!(
+            head.starts_with("HTTP/1.1 200 OK"),
+            "GET {endpoint} answered {head:?}"
+        );
+        assert_eq!(
+            header_value(head, "Content-Type"),
+            Some("application/json"),
+            "GET {endpoint}: Content-Type"
+        );
+        let declared: u64 = header_value(head, "Content-Length")
+            .unwrap_or_else(|| panic!("GET {endpoint}: no Content-Length in {head:?}"))
+            .parse()
+            .unwrap_or_else(|error| {
+                panic!("GET {endpoint}: Content-Length is not a byte count: {error}")
+            });
+        assert_eq!(
+            declared,
+            body.len() as u64,
+            "GET {endpoint}: Content-Length must equal the {} body bytes received",
+            body.len()
+        );
+        let text = std::str::from_utf8(body)
+            .unwrap_or_else(|error| panic!("GET {endpoint}: body is not UTF-8: {error}"));
+        let document: serde_json::Value = serde_json::from_str(text)
+            .unwrap_or_else(|error| panic!("GET {endpoint}: body is not JSON: {error}"));
+        assert!(
+            document.is_object(),
+            "GET {endpoint}: body is not a JSON object: {document}"
+        );
+    }
+
+    #[test]
+    fn hil_loopback_ranged_download_is_byte_exact() {
+        // HIL: needs the SD card (the fixture formats and mounts it once per
+        // binary) and the board's LwIP stack.
+        let card = storage::hil_fixture::card();
+        assert_eq!(
+            card.base_path(),
+            storage::BASE_PATH,
+            "HIL: the fixture mounts the card where the server expects it"
+        );
+        let path = format!("{}/{FIXTURE_NAME}", storage::BASE_PATH);
+        write_fixture(&path);
+
+        let _guard = sockets();
+        net::ensure_netif_initialised().expect("HIL: LwIP initialises before the first socket");
+        let server = start(test_config(0)).expect("HIL: the server starts on an ephemeral port");
+        let endpoint = "/api/v1/files/_hil_range.bin";
+        let request_head = format!(
+            "GET {endpoint} HTTP/1.1\r\nHost: board\r\nRange: bytes={RANGE_START}-{RANGE_END}\r\n\r\n"
+        );
+        let response = request(&server, request_head.as_bytes());
+        server.stop();
+        let _ = std::fs::remove_file(&path);
+
+        let (head, body) = split_head(&response, endpoint);
+        assert!(
+            head.starts_with("HTTP/1.1 206 Partial Content"),
+            "GET {endpoint} Range {RANGE_START}-{RANGE_END} answered {head:?}"
+        );
+        let expected_range = format!("bytes {RANGE_START}-{RANGE_END}/{FIXTURE_BYTES}");
+        assert_eq!(
+            header_value(head, "Content-Range"),
+            Some(expected_range.as_str()),
+            "GET {endpoint} Range {RANGE_START}-{RANGE_END}: Content-Range"
+        );
+        assert_eq!(
+            header_value(head, "Content-Length"),
+            Some(RANGE_LEN.to_string().as_str()),
+            "GET {endpoint} Range {RANGE_START}-{RANGE_END}: Content-Length"
+        );
+        assert_eq!(
+            body.len() as u64,
+            RANGE_LEN,
+            "GET {endpoint} Range {RANGE_START}-{RANGE_END}: expected {RANGE_LEN} body bytes, got {}",
+            body.len()
+        );
+        for (index, received) in body.iter().enumerate() {
+            let offset = RANGE_START + index as u64;
+            assert_eq!(
+                *received,
+                pattern_byte(offset),
+                "GET {endpoint} Range {RANGE_START}-{RANGE_END}: body byte at file offset {offset} differs"
+            );
+        }
+    }
+
+    #[test]
+    fn hil_router_matches_openapi_paths() {
+        // HIL: parses the document embedded in the device image against the
+        // route table this build routes through; no card and no socket, but it
+        // belongs beside the other device-only checks.
+        let document: serde_json::Value = serde_json::from_str(crate::json::openapi_body())
+            .unwrap_or_else(|error| panic!("the embedded openapi.json does not parse: {error}"));
+        assert_eq!(
+            document["openapi"].as_str(),
+            Some("3.0.3"),
+            "the embedded document is OpenAPI 3.0.3"
+        );
+        let paths = document["paths"]
+            .as_object()
+            .expect("the embedded document has a paths object");
+
+        let mut documented = std::vec::Vec::new();
+        for (path, item) in paths {
+            let item = item
+                .as_object()
+                .unwrap_or_else(|| panic!("openapi.json paths[{path}] is not an object"));
+            for (method, operation) in item {
+                if operation.is_object() && matches!(method.as_str(), "get" | "head") {
+                    documented.push((method.to_ascii_uppercase(), path.clone()));
+                }
+            }
+        }
+
+        for (method, path) in &documented {
+            assert!(
+                crate::router::ROUTES.contains(&(method.as_str(), path.as_str())),
+                "openapi.json documents {method} {path} but ROUTES does not answer it"
+            );
+        }
+        for (method, path) in crate::router::ROUTES {
+            assert!(
+                documented.iter().any(|(m, p)| m == method && p == path),
+                "ROUTES answers {method} {path} but openapi.json does not document it"
+            );
+        }
+        assert_eq!(
+            documented.len(),
+            crate::router::ROUTES.len(),
+            "documented operations {documented:?} do not match ROUTES"
+        );
     }
 }
