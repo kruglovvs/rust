@@ -5,16 +5,22 @@
 //!
 //! ```text
 //! pub enum SensorState { Reported, Unavailable }
-//! pub struct Status { pub snapshot: Snapshot<'static>, pub temperature_sensor: SensorState }
+//! pub struct Status { /* owns the run-time strings */ }
+//! impl Status {
+//!     Status::snapshot(&self) -> Snapshot<'_>;
+//!     Status::temperature_sensor(&self) -> SensorState;
+//! }
 //! pub fn gather(cfg: &Config) -> Status
 //! pub fn rec_dir(mount: &str) -> String
 //! pub fn newest_recording(dir: &str) -> Option<String>
 //! ```
 //!
 //! This is the **only** module in the crate allowed to call an `esp_*` API.
-//! [`gather`] reads the device once and returns a [`Snapshot`] that borrows
-//! only `'static` data, so the response builder cannot observe device state
-//! changing under it:
+//! [`gather`] reads the device once and returns a [`Status`] that **owns** the
+//! two strings the document needs at run time (the station address and the
+//! newest recording's mount-relative path). [`Status::snapshot`] borrows them
+//! for the response builder without allocating, so the request path cannot
+//! observe device state changing under it and cannot grow the heap:
 //!
 //! - `uptime_s` from `esp_timer_get_time` in microseconds, saturated to zero
 //!   on a negative reading.
@@ -45,11 +51,13 @@
 //! `recording_enabled` come from the [`Config`] the boot path passed.
 //!
 //! [`newest_recording`] is plain `std::fs`, not a device API: it lists `dir`,
-//! keeps regular files only, and returns the lexicographically largest name,
-//! which is the newest because the recorder writes `REC_0001.avi`,
-//! `REC_0002.avi`, and so on. Every failure (missing directory, unreadable
-//! entry, non-UTF-8 name) is `None`: the status document must still answer
-//! when the card is absent.
+//! keeps regular files only, and returns the file whose name has the largest
+//! numeric suffix (`muxed_10.avi` beats `muxed_9.avi`), falling back to the
+//! lexicographically largest name when a name has no suffix. The recorder
+//! writes `muxed_0.avi`, `muxed_1.avi`, and so on, so the suffix is the
+//! sequence. Every failure (missing directory, unreadable entry, non-UTF-8
+//! name) is `None`: the status document must still answer when the card is
+//! absent.
 //!
 //! The sensor driver is installed once behind a `std::sync::Mutex` and reused,
 //! then disabled after each read, so concurrent requests serialise instead of
@@ -84,25 +92,84 @@ impl SensorState {
 }
 
 /// One gathered status document plus the sensor outcome.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// The station address and the newest recording path are owned by this value;
+/// [`Status::snapshot`] lends them to the response builder. Rebuilding the
+/// response therefore allocates nothing and leaks nothing.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Status {
-    pub snapshot: Snapshot<'static>,
-    pub temperature_sensor: SensorState,
+    ip: String,
+    recording_file: Option<String>,
+    document: Document,
+    temperature_sensor: SensorState,
 }
 
-/// Read the device once and build a [`Snapshot`] borrowing only `'static`
-/// data.
+/// The gathered fields that never vary per request.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Document {
+    version: &'static str,
+    build: &'static str,
+    uptime_s: u64,
+    hostname: &'static str,
+    mounted: bool,
+    total_bytes: u64,
+    free_bytes: u64,
+    clock_khz: u64,
+    rtsp_port: u16,
+    rtsp_path: &'static str,
+    rtsp_running: bool,
+    recording_enabled: bool,
+    temperature_c: Option<f32>,
+    heap_internal_free: u64,
+    heap_spiram_free: u64,
+}
+
+impl Status {
+    /// Borrow the gathered values as the document builder's snapshot.
+    ///
+    /// Every field is copied or borrowed from `self`; this allocates nothing,
+    /// so it is safe to call once per request.
+    pub fn snapshot(&self) -> Snapshot<'_> {
+        Snapshot {
+            version: self.document.version,
+            build: self.document.build,
+            uptime_s: self.document.uptime_s,
+            ip: &self.ip,
+            hostname: self.document.hostname,
+            mounted: self.document.mounted,
+            total_bytes: self.document.total_bytes,
+            free_bytes: self.document.free_bytes,
+            clock_khz: self.document.clock_khz,
+            rtsp_port: self.document.rtsp_port,
+            rtsp_path: self.document.rtsp_path,
+            rtsp_running: self.document.rtsp_running,
+            recording_enabled: self.document.recording_enabled,
+            recording_file: self.recording_file.as_deref(),
+            temperature_c: self.document.temperature_c,
+            heap_internal_free: self.document.heap_internal_free,
+            heap_spiram_free: self.document.heap_spiram_free,
+        }
+    }
+
+    /// Whether the on-die sensor produced a reading for this gather.
+    pub const fn temperature_sensor(&self) -> SensorState {
+        self.temperature_sensor
+    }
+}
+
+/// Read the device once and build a [`Status`] that owns its run-time strings.
 pub fn gather(cfg: &Config) -> Status {
     let mount = cfg.mount_point;
     let mounted = std::fs::read_dir(mount).is_ok();
     let (total_bytes, free_bytes) = volume_info(mount);
     let (temperature_c, temperature_sensor) = read_temperature();
     Status {
-        snapshot: Snapshot {
+        ip: format_ip(net::station_ipv4()),
+        recording_file: newest_recording(&rec_dir(mount)).map(|name| format!("rec/{name}")),
+        document: Document {
             version: VERSION,
             build: BUILD,
             uptime_s: uptime_seconds(),
-            ip: leak(format_ip(net::station_ipv4())),
             hostname: HOSTNAME,
             mounted,
             total_bytes,
@@ -112,8 +179,6 @@ pub fn gather(cfg: &Config) -> Status {
             rtsp_path: RTSP_PATH,
             rtsp_running: cfg.rtsp_running,
             recording_enabled: cfg.recording_enabled,
-            recording_file: newest_recording(&rec_dir(mount))
-                .map(|name| leak(format!("rec/{name}"))),
             temperature_c,
             heap_internal_free: heap_free(sys::MALLOC_CAP_INTERNAL),
             heap_spiram_free: heap_free(sys::MALLOC_CAP_SPIRAM),
@@ -127,7 +192,7 @@ pub fn rec_dir(mount: &str) -> String {
     format!("{mount}/rec")
 }
 
-/// The newest (lexicographically largest) regular file in `dir`, or `None`.
+/// The newest (largest numeric suffix, then name) regular file in `dir`.
 pub fn newest_recording(dir: &str) -> Option<String> {
     let entries = std::fs::read_dir(dir).ok()?;
     let mut newest: Option<String> = None;
@@ -141,11 +206,40 @@ pub fn newest_recording(dir: &str) -> Option<String> {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if newest.as_ref().is_none_or(|current| name > *current) {
+        if newest
+            .as_ref()
+            .is_none_or(|current| is_newer_recording(&name, current))
+        {
             newest = Some(name);
         }
     }
     newest
+}
+
+/// The numeric suffix of a recording name (`muxed_10.avi` -> `Some(10)`).
+fn recording_sequence(name: &str) -> Option<u64> {
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let prefix_len = stem
+        .trim_end_matches(|character: char| character.is_ascii_digit())
+        .len();
+    let digits = &stem[prefix_len..];
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+/// Whether `candidate` should replace `current` as the newest recording.
+fn is_newer_recording(candidate: &str, current: &str) -> bool {
+    match (recording_sequence(candidate), recording_sequence(current)) {
+        (Some(candidate_sequence), Some(current_sequence))
+            if candidate_sequence != current_sequence =>
+        {
+            candidate_sequence > current_sequence
+        }
+        _ => candidate > current,
+    }
 }
 
 /// Install (once), enable, read and disable the on-die temperature sensor.
@@ -280,16 +374,6 @@ fn format_ip(ip: Option<std::net::Ipv4Addr>) -> String {
     }
 }
 
-/// Intern `text` for the lifetime of the process.
-///
-/// [`Snapshot`] borrows its strings and is rebuilt per request. Recycling one
-/// buffer would need a lock around the whole response (and still make the
-/// borrow unsound if a second request wrote into it); leaking a handful of
-/// short strings per request is the bounded cost that keeps the builder pure.
-fn leak(text: String) -> &'static str {
-    Box::leak(text.into_boxed_str())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,31 +407,110 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "HIL: needs a mounted SD card"]
     fn newest_recording_picks_the_largest_name() {
         let scratch = Scratch::new("largest");
-        for name in ["REC_0001.avi", "REC_0003.avi", "REC_0002.avi"] {
+        for name in ["muxed_1.avi", "muxed_10.avi", "muxed_9.avi"] {
             std::fs::write(scratch.join(name), b"x").expect("write");
         }
         assert_eq!(
             newest_recording(&scratch.path()),
-            Some("REC_0003.avi".to_string())
+            Some("muxed_10.avi".to_string()),
+            "the sequence is numeric, not lexicographic"
         );
     }
 
     #[test]
+    #[ignore = "HIL: needs a mounted SD card"]
     fn newest_recording_skips_directories_and_absent_dirs() {
         let scratch = Scratch::new("skip");
-        std::fs::create_dir(scratch.join("REC_9999.avi")).expect("dir");
-        std::fs::write(scratch.join("REC_0001.avi"), b"x").expect("write");
+        std::fs::create_dir(scratch.join("muxed_9999.avi")).expect("dir");
+        std::fs::write(scratch.join("muxed_1.avi"), b"x").expect("write");
         assert_eq!(
             newest_recording(&scratch.path()),
-            Some("REC_0001.avi".to_string()),
+            Some("muxed_1.avi".to_string()),
             "a directory named like a recording is not a recording"
         );
         assert_eq!(
             newest_recording(&scratch.join("missing")),
             None,
             "an absent directory is no recording, not a panic"
+        );
+    }
+
+    #[test]
+    fn recording_names_order_by_numeric_suffix() {
+        assert_eq!(recording_sequence("muxed_10.avi"), Some(10));
+        assert_eq!(recording_sequence("muxed_9.avi"), Some(9));
+        assert_eq!(recording_sequence("muxed.avi"), None);
+        assert!(is_newer_recording("muxed_10.avi", "muxed_9.avi"));
+        assert!(!is_newer_recording("muxed_9.avi", "muxed_10.avi"));
+        assert!(is_newer_recording("REC_0002.avi", "REC_0001.avi"));
+        assert!(is_newer_recording("b.avi", "a.avi"));
+    }
+
+    #[test]
+    fn status_snapshot_is_stable_across_calls() {
+        let status = Status {
+            ip: "192.168.1.50".to_string(),
+            recording_file: Some("rec/muxed_10.avi".to_string()),
+            document: Document {
+                version: VERSION,
+                build: BUILD,
+                uptime_s: 42,
+                hostname: HOSTNAME,
+                mounted: true,
+                total_bytes: 31_914_983_424,
+                free_bytes: 29_000_000_000,
+                clock_khz: 20_000,
+                rtsp_port: 554,
+                rtsp_path: RTSP_PATH,
+                rtsp_running: true,
+                recording_enabled: true,
+                temperature_c: Some(47.5),
+                heap_internal_free: 200_000,
+                heap_spiram_free: 7_000_000,
+            },
+            temperature_sensor: SensorState::Reported,
+        };
+
+        let first = status.snapshot();
+        let second = status.snapshot();
+        assert_eq!(first, second, "the builder adds nothing between calls");
+        assert_eq!(first.ip, "192.168.1.50");
+        assert_eq!(first.recording_file, Some("rec/muxed_10.avi"));
+        assert_eq!(first.temperature_c, Some(47.5));
+        assert_eq!(status.temperature_sensor(), SensorState::Reported);
+    }
+
+    #[test]
+    fn repeated_gathers_do_not_grow_the_internal_heap() {
+        const ITERATIONS: u64 = 1000;
+        const SLACK: u64 = 4 * 1024;
+
+        let cfg = Config {
+            port: 0,
+            mount_point: storage::BASE_PATH,
+            rtsp_port: 554,
+            rtsp_path: RTSP_PATH,
+            rtsp_running: true,
+            recording_enabled: true,
+        };
+        // Warm the sensor driver and the allocator's caches before measuring.
+        let _ = gather(&cfg).snapshot();
+
+        let before = heap_free(sys::MALLOC_CAP_INTERNAL);
+        for _ in 0..ITERATIONS {
+            let status = gather(&cfg);
+            std::hint::black_box(status.snapshot());
+        }
+        let after = heap_free(sys::MALLOC_CAP_INTERNAL);
+
+        let consumed = before.saturating_sub(after);
+        assert!(
+            consumed <= SLACK,
+            "{ITERATIONS} gathers consumed {consumed} bytes of internal heap \
+             ({before} -> {after}); the request path must not leak"
         );
     }
 
@@ -432,12 +595,12 @@ mod tests {
             recording_enabled: true,
         };
         let status = gather(&cfg);
-        let snapshot = status.snapshot;
+        let snapshot = status.snapshot();
         assert!(!snapshot.version.is_empty());
         assert_eq!(snapshot.rtsp_port, 554);
         assert_eq!(snapshot.rtsp_path, RTSP_PATH);
         assert_eq!(snapshot.hostname, HOSTNAME);
-        match status.temperature_sensor {
+        match status.temperature_sensor() {
             SensorState::Reported => {
                 let celsius = snapshot.temperature_c.expect("reported implies a reading");
                 assert!(celsius.is_finite(), "{celsius}");

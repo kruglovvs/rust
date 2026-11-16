@@ -57,7 +57,7 @@
 //! read; FatFs serialises access per volume, so every chunk is a window in
 //! which the recorder's write waits. 4 KiB bounds that window at a few
 //! milliseconds while still keeping the per-request call count modest, and it
-//! fits the worker's 24 KiB stack with room to spare. Raising it lengthens the
+//! fits the worker's 16 KiB stack with room to spare. Raising it lengthens the
 //! recorder's stall; lowering it costs open/seek work without helping the
 //! muxer. Do not change it without a measurement.
 //!
@@ -774,21 +774,20 @@ mod tests {
 
     #[test]
     fn write_body_reports_exact_byte_count() {
-        let data = pattern(3 * MIB as usize);
+        let data = pattern(3 * CHUNK);
         let files = [("rec/REC_0001.avi", &data[..])];
         let source = MemorySource::new(&files);
 
-        // The QA scenario: a 1 MiB window in the middle of a 3 MiB file.
         let body = Body::File {
             path: "rec/REC_0001.avi".to_string(),
-            start: MIB,
-            len: MIB,
+            start: CHUNK as u64,
+            len: CHUNK as u64,
         };
         let mut out = Vec::new();
         let written = write_body(&body, &source, &mut out).expect("the window streams");
-        assert_eq!(written, MIB);
+        assert_eq!(written, CHUNK as u64);
         assert_eq!(out.len() as u64, written);
-        assert_eq!(out, data[MIB as usize..(2 * MIB) as usize]);
+        assert_eq!(out, data[CHUNK..2 * CHUNK]);
 
         // The whole file reports its whole length, not the chunk count.
         let whole = Body::File {

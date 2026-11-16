@@ -148,13 +148,10 @@ impl Status {
     pub const OK: Status = Status(200);
     pub const PARTIAL_CONTENT: Status = Status(206);
     pub const BAD_REQUEST: Status = Status(400);
-    pub const FORBIDDEN: Status = Status(403);
     pub const NOT_FOUND: Status = Status(404);
     pub const METHOD_NOT_ALLOWED: Status = Status(405);
-    pub const PAYLOAD_TOO_LARGE: Status = Status(413);
     pub const RANGE_NOT_SATISFIABLE: Status = Status(416);
     pub const INTERNAL_SERVER_ERROR: Status = Status(500);
-    pub const NOT_IMPLEMENTED: Status = Status(501);
     pub const SERVICE_UNAVAILABLE: Status = Status(503);
 
     pub const fn new(code: u16) -> Status {

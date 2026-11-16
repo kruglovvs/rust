@@ -16,7 +16,7 @@
     }
   ],
   "tags": [
-    { "name": "status", "description": "Device state without touching the card" },
+    { "name": "status", "description": "Device state, including a bounded listing of the mount" },
     { "name": "files", "description": "Recordings on the mounted SD card" },
     { "name": "meta", "description": "The API's own description" }
   ],
@@ -43,7 +43,7 @@
       "get": {
         "tags": ["status"],
         "summary": "Device status document",
-        "description": "Firmware identity, uptime, station address, heap, SD-card volume and clock, RTSP configuration, recording state, the newest recording and the internal temperature sensor reading. Answered without reading a file from the card, so it stays responsive while a download is in progress.",
+        "description": "Firmware identity, uptime, station address, heap, SD-card volume and clock, RTSP configuration, recording state, the newest recording and the internal temperature sensor reading. Building it lists the mount and the `/rec` directory once but never reads file contents, so it also answers on a card-less boot.",
         "operationId": "getStatus",
         "responses": {
           "200": {
@@ -71,8 +71,7 @@
                 "schema": { "$ref": "#/components/schemas/FileList" }
               }
             }
-          },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          }
         }
       }
     },
@@ -157,7 +156,6 @@
             }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
-          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "416": { "$ref": "#/components/responses/RangeNotSatisfiable" }
         }
@@ -180,7 +178,6 @@
           "200": { "description": "Whole-file headers, no body." },
           "206": { "description": "Range headers, no body." },
           "400": { "$ref": "#/components/responses/BadRequest" },
-          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "416": { "$ref": "#/components/responses/RangeNotSatisfiable" }
         }
@@ -381,14 +378,6 @@
           }
         }
       },
-      "Forbidden": {
-        "description": "The requested path is not a safe card path (traversal, absolute path, control byte).",
-        "content": {
-          "application/json": {
-            "schema": { "$ref": "#/components/schemas/ApiError" }
-          }
-        }
-      },
       "NotFound": {
         "description": "No such route, or no such file.",
         "content": {
@@ -398,16 +387,20 @@
         }
       },
       "RangeNotSatisfiable": {
-        "description": "The range selects no byte of the file; the response carries `Content-Range: bytes */<total>` and a zero-length body.",
+        "description": "The range selects no byte of the file. The response has a zero-length body, `Content-Type: application/octet-stream`, `Content-Length: 0` and `Content-Range: bytes */<total>`.",
         "headers": {
           "Content-Range": {
             "description": "`bytes */<total>`.",
             "schema": { "type": "string" }
+          },
+          "Content-Length": {
+            "description": "Always `0`; the body is empty.",
+            "schema": { "type": "integer" }
           }
         },
         "content": {
-          "application/json": {
-            "schema": { "$ref": "#/components/schemas/ApiError" }
+          "application/octet-stream": {
+            "schema": { "type": "string", "format": "binary" }
           }
         }
       }

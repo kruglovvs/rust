@@ -189,9 +189,10 @@ The status document always carries the same 17 properties: `version`, `build`,
 `clock_khz`, `rtsp_port`, `rtsp_path`, `rtsp_running`, `recording_enabled`,
 `recording_file`, `temperature_c`, `heap_internal_free` and
 `heap_spiram_free`. `recording_file` and `temperature_c` are nullable. The
-document is answered without reading a file from the card, so it stays
-responsive during a download and on a boot without a card. The SD clock field
-is read only when the volume is mounted.
+document is built from a fresh snapshot that lists the mount and the
+`<mount>/rec` directory once but never reads file contents, so it stays
+available on a boot without a card. The SD clock field is read only when the
+volume is mounted.
 
 `firmware/api/openapi.json` is the contract. `harness/tests/api_contract.rs`
 validates the live board against it, and the firmware serves the same bytes at

@@ -174,7 +174,6 @@ pub const AUDIO_SAMPLE_RATE: u32 = parse_u32(option_env!("AUDIO_SAMPLE_RATE"), 4
 pub const AUDIO_BITRATE: u32 = parse_u32(option_env!("AUDIO_BITRATE"), 64_000);
 // Consumed by the file server; declared here so every build knob lives in one
 // place and a build without it still gets the documented default.
-#[allow(dead_code)]
 pub const FILE_SERVER_PORT: u32 = parse_u32(option_env!("FILE_SERVER_PORT"), 80);
 
 /// Raw `RECORD_MODE` text, absent unless the build was handed one.

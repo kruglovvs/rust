@@ -433,7 +433,10 @@ fn accept_loop(
 
 fn busy_response(mut stream: TcpStream) {
     // The accept thread must never wait on a client, not even for this write.
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    if let Err(error) = stream.set_write_timeout(Some(IO_TIMEOUT)) {
+        logging::log!("filesrv: 503 connection dropped: cannot set a write timeout: {error}");
+        return;
+    }
     let mut body = String::new();
     json::error_body(
         Status::SERVICE_UNAVAILABLE,
@@ -518,11 +521,17 @@ fn head_is_complete(bytes: &[u8]) -> bool {
 }
 
 fn handle_connection(mut stream: TcpStream, config: &Config, source: &CardSource) {
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    if let Err(error) = stream.set_read_timeout(Some(IO_TIMEOUT)) {
+        logging::log!("filesrv: connection dropped: cannot set a read timeout: {error}");
+        return;
+    }
+    if let Err(error) = stream.set_write_timeout(Some(IO_TIMEOUT)) {
+        logging::log!("filesrv: connection dropped: cannot set a write timeout: {error}");
+        return;
+    }
 
     // Heap, not stack: the worker already holds a 4 KiB chunk buffer and the
-    // parse/build frames on a 24 KiB stack.
+    // parse/build frames on a 16 KiB stack.
     let mut head = vec![0u8; MAX_HEAD];
     let filled = match read_head(&mut stream, &mut head) {
         Ok(filled) => filled,
@@ -537,6 +546,7 @@ fn handle_connection(mut stream: TcpStream, config: &Config, source: &CardSource
         Err(HeadError::TimedOut) => {
             let bytes = send_json_error(
                 &mut stream,
+                http::Method::Get,
                 Status::BAD_REQUEST,
                 "no complete request head within 10 s",
             );
@@ -546,6 +556,7 @@ fn handle_connection(mut stream: TcpStream, config: &Config, source: &CardSource
         Err(HeadError::TooLarge) => {
             let bytes = send_json_error(
                 &mut stream,
+                http::Method::Get,
                 Status::BAD_REQUEST,
                 "request head exceeds 8192 bytes",
             );
@@ -557,7 +568,12 @@ fn handle_connection(mut stream: TcpStream, config: &Config, source: &CardSource
     let request = match http::parse(&head[..filled]) {
         Ok(request) => request,
         Err(error) => {
-            let bytes = send_json_error(&mut stream, Status::BAD_REQUEST, &error.to_string());
+            let bytes = send_json_error(
+                &mut stream,
+                http::Method::Get,
+                Status::BAD_REQUEST,
+                &error.to_string(),
+            );
             logging::log!("filesrv: - - -> {} {bytes}", Status::BAD_REQUEST.code());
             return;
         }
@@ -621,7 +637,7 @@ fn serve_request(
     let response = match response_for(request, head, config, source) {
         Ok(response) => response,
         Err((status, message)) => {
-            let bytes = send_json_error(stream, status, message);
+            let bytes = send_json_error(stream, request.method, status, message);
             return (status.code(), bytes);
         }
     };
@@ -669,7 +685,8 @@ fn response_for(
             }
             Route::Status => {
                 let mut body = String::new();
-                json::status_body(&status::gather(config).snapshot, &mut body);
+                let status = status::gather(config);
+                json::status_body(&status.snapshot(), &mut body);
                 Ok(Response::json(body))
             }
             Route::Files => {
@@ -750,11 +767,19 @@ fn download_head(status: Status, content_length: u64, content_range: Option<&str
     head
 }
 
-fn send_json_error(stream: &mut TcpStream, status: Status, message: &str) -> u64 {
+fn send_json_error(
+    stream: &mut TcpStream,
+    method: http::Method,
+    status: Status,
+    message: &str,
+) -> u64 {
     let mut body = String::new();
     json::error_body(status, message, &mut body);
     let head = ResponseHead::new(status, JSON, body.len() as u64);
     if write_static_head(stream, &head).is_err() {
+        return 0;
+    }
+    if method == http::Method::Head {
         return 0;
     }
     match stream.write_all(body.as_bytes()) {
@@ -1115,6 +1140,35 @@ mod tests {
         assert!(
             response.starts_with("HTTP/1.1 400 Bad Request"),
             "a head with no blank line inside {MAX_HEAD} bytes is a 400: {response}"
+        );
+    }
+
+    #[test]
+    fn head_error_has_a_head_but_no_body() {
+        let _guard = sockets();
+        let server = start_on_port_zero();
+
+        let response = request(
+            &server,
+            b"HEAD /api/v1/files/rec/absent.avi HTTP/1.1\r\nHost: board\r\n\r\n",
+        );
+        let text = String::from_utf8(response).expect("the error head is UTF-8");
+        assert!(
+            text.starts_with("HTTP/1.1 404 Not Found"),
+            "a missing download is a 404 for HEAD too: {text}"
+        );
+        let declared: u64 = header_value(&text, "Content-Length")
+            .expect("the error head carries Content-Length")
+            .parse()
+            .expect("Content-Length is a number");
+        assert!(
+            declared > 0,
+            "HEAD reports the length GET would have sent: {text}"
+        );
+        assert_eq!(
+            body_of(&text),
+            "",
+            "a HEAD error must not carry the JSON body: {text}"
         );
     }
 

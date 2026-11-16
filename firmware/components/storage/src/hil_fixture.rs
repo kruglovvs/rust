@@ -570,10 +570,9 @@ mod tests {
         );
         first.remove(PROBE_FILE);
 
-        // Failure path (todo-5 adaptation 2): exFAT is gone, so prove the
-        // error path by mounting a second time on the still-mounted volume.
-        // `Storage::bringup` must return a typed error, bounded in time, with
-        // no hang and no panic.
+        // Failure path (todo-5 adaptation 2): the volume is already mounted, so
+        // prove the error path by mounting a second time on it. `Storage::bringup`
+        // must return a typed error, bounded in time, with no hang and no panic.
         let started = Instant::now();
         let error = match second_bringup() {
             Err(error) => error,

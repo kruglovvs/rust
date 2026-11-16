@@ -26,10 +26,12 @@
 //! written for [`Snapshot::recording_file`] and
 //! [`Snapshot::temperature_c`] when they are absent, never an omitted key.
 //! Numbers stay JSON numbers (`uptime_s`, byte counts and the port are
-//! integers, `temperature_c` should be finite - a non-finite reading is
-//! rejected by `serde_json` rather than silently written as `null`). The
-//! object is serialised with `serde_json`, so the output is valid JSON by
-//! construction and the caller can append it to a `String` buffer it reuses.
+//! integers, `temperature_c` should be finite - `serde_json` serialises a
+//! non-finite float as `null` rather than rejecting it, so
+//! [`crate::status`] filters a non-finite reading before the builder sees
+//! it). The object is serialised with `serde_json`, so the output is valid
+//! JSON by construction and the caller can append it to a `String` buffer it
+//! reuses.
 //!
 //! [`index_body`] appends `{"endpoints":[...]}` with one `method`, `path` and
 //! `description` per entry of [`crate::router::ROUTES`], in table order. It is

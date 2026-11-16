@@ -146,10 +146,11 @@ rtsp_port rtsp_path rtsp_running recording_enabled recording_file temperature_c
 heap_internal_free heap_spiram_free
 ```
 
-`recording_file` and `temperature_c` are nullable. The document is answered
-without reading a file from the card, so it stays responsive during a download
-and on a card-less boot. `firmware/api/openapi.json` is the contract, and the
-board serves the same bytes from `include_str!`.
+`recording_file` and `temperature_c` are nullable. The document is built from a
+fresh device snapshot: it lists the mount and the `<mount>/rec` directory once
+but never reads file contents, so it also answers on a card-less boot.
+`firmware/api/openapi.json` is the contract, and the board serves the same bytes
+from `include_str!`.
 
 Two requests that work against the board now:
 
@@ -176,10 +177,11 @@ it. The third asks for the first KiB and expects `206` with
 `Content-Range: bytes 0-1023/<total>`.
 
 The server has one accept thread and one worker. When the worker is busy a new
-connection is refused at once with `503` and a JSON error, so a long download
-never blocks a status request. Each connection has a 10 s read timeout, a 10 s
-write timeout and an 8 KiB request-head cap. The server declines to start when
-fewer than 64 KiB of internal SRAM remain after its own stacks.
+connection is refused at once with `503` and a JSON error, so a status request
+that arrives during a download gets `503` rather than waiting behind it. Each
+connection has a 10 s read timeout, a 10 s write timeout and an 8 KiB
+request-head cap. The server declines to start when fewer than 64 KiB of
+internal SRAM remain after its own stacks.
 
 ## Configuration
 

@@ -118,7 +118,15 @@ pub fn run() -> ! {
     let recording_enabled =
         cfg!(feature = "avi-recording") && !mount_point.is_empty() && RECORD_MODE.records();
     let rtsp_running = RECORD_MODE.streams();
-    let fileserver_port = FILE_SERVER_PORT as u16;
+    let fileserver_port = match u16::try_from(FILE_SERVER_PORT) {
+        Ok(port) => port,
+        Err(_) => {
+            logging::log!(
+                "boot: WARNING: FILE_SERVER_PORT {FILE_SERVER_PORT} does not fit a TCP port; using 80"
+            );
+            80
+        }
+    };
     let _fileserver = fileserver::start(fileserver::Config {
         port: fileserver_port,
         mount_point: storage::BASE_PATH,
