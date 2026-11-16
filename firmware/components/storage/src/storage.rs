@@ -91,7 +91,7 @@ use esp_idf_svc::io::vfs::MountedFatfs;
 // Private FFI boundary — the ONLY `unsafe` in this file.
 // ---------------------------------------------------------------------------
 
-mod ffi {
+pub(crate) mod ffi {
     use core::ffi::{c_char, c_int, CStr};
     use core::sync::atomic::{AtomicI32, Ordering};
 
@@ -222,7 +222,10 @@ mod ffi {
     }
 
     /// Monotonic microsecond timestamp (`esp_timer_get_time`).
-    pub(super) fn now_us() -> i64 {
+    ///
+    /// `pub(crate)` so the device HIL fixture ([`crate::hil_fixture`]) can time
+    /// its own SD I/O with the same clock the boot battery uses.
+    pub(crate) fn now_us() -> i64 {
         // SAFETY: `esp_timer_get_time` is a plain accessor with no preconditions.
         unsafe { esp_timer_get_time() }
     }
@@ -276,7 +279,7 @@ mod ffi {
 pub const BASE_PATH: &str = "/sdcard";
 
 /// FATFS drive number registered by `Fatfs::new_sdcard`.
-const DRIVE: u8 = 0;
+pub(crate) const DRIVE: u8 = 0;
 
 /// Maximum simultaneously-open files handed to `MountedFatfs::mount`.
 const MAX_OPEN_FILES: usize = 5;
@@ -782,7 +785,10 @@ impl<'d> Drop for RawSd<'d> {
 /// 3. `CMD8` (`SEND_IF_COND`, R7, arg `0x1AA`, `0x87` CRC) — all-ones here is
 ///    the *not selected* verdict, otherwise `classify_cmd8`;
 /// 4. for a legacy card, `CMD55` + `ACMD41` then `CMD58`.
-fn probe_pin<'d>(spi: &'d SpiDriver<'d>, cs: CsPin) -> Result<ProbeOutcome, StorageError> {
+///
+/// `pub(crate)` so the device HIL fixture (`hil_fixture::card`) can learn which
+/// pin the card answers on before it formats.
+pub(crate) fn probe_pin<'d>(spi: &'d SpiDriver<'d>, cs: CsPin) -> Result<ProbeOutcome, StorageError> {
     let mut raw = RawSd::new(spi, cs)?;
 
     // (1) Bus idle with CS deasserted: the card's MISO must be pulled high.
@@ -1341,7 +1347,10 @@ impl<'d> Storage<'d> {
 }
 /// Deterministic 32 KiB pattern: non-constant so an offset bug cannot pass,
 /// and identical on every chunk so a read-back compare needs no bookkeeping.
-fn pattern_chunk() -> Vec<u8> {
+///
+/// `pub(crate)` so the device HIL throughput test compares against the exact
+/// bytes the boot battery writes, instead of a second pattern that could drift.
+pub(crate) fn pattern_chunk() -> Vec<u8> {
     (0..TRANSFER_BUF_BYTES).map(|i| (i % 251) as u8).collect()
 }
 
