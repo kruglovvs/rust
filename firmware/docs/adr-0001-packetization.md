@@ -1,5 +1,9 @@
 # ADR-0001: RFC 2435 RTP/JPEG packetization — implement in-house, reject `rusty_esp_video`
 
+> **Superseded:** The in-house RFC 2435 packetizer was replaced by the
+> Espressif GMF capture/RTSP pipeline. The rejection of `rusty_esp_video`
+> still stands. See `firmware/docs/architecture.md` for the current design.
+
 - **Status:** Accepted, 2026-10-11 (plan Todo 6)
 - **Decision:** **REJECT `rusty_esp_video` 0.1.2.** Implement `firmware/src/jfif.rs`
   (no_std, zero-dependency) as the RFC 2435 extractor. Default posture of the audit

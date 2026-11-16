@@ -1,80 +1,94 @@
 # Failure Modes
 
-Status: audited against current source on 2026-11-07 (Task 18). Every
-diagnostic named below is a real enum variant, `Display` string, or `println!`
-format in `firmware/src/`. The coverage column separates behaviour that the
-**host harness** actually executes from behaviour that is **device-blocked**:
-compiled only for `xtensa-esp32s3-espidf`, or requiring a board, card, radio,
-camera, or client that this environment does not have.
+Status: audited against the source on 2026-11-16 (Task 18). Every diagnostic
+named below is a real `Display` string, `println!` line or `logging::log!`
+format in the delivered tree. The coverage column separates behaviour that the
+host harness executes from behaviour that needs the board, a card, a radio or a
+camera. Nothing here is a promise about hardware that has not been observed.
 
-## Host test targets (what "host-covered" means)
+## Host Test Targets
 
-`cd harness && cargo test` compiles the module through a `#[path]` include and
-runs its `#[cfg(test)]` suite on the host:
+`./scripts/test-harness.sh` (a `cargo test` in `harness/`) compiles these
+firmware modules through `#[path]` includes and runs their `#[cfg(test)]`
+suites on the host:
 
 | Target | Firmware modules |
 |---|---|
-| `audio_quality` | `audio_quality.rs` |
-| `task10_recorder` | `muxer.rs`, `recorder.rs` |
-| `task11_rtsp` | `session.rs`, `rtsp/` |
-| `task12_payload` | `rtsp/payload/`, `jfif.rs` |
-| `task13_rtcp` | `rtcp.rs` |
-| `task14_net` | `session.rs`, `net.rs`, `artifact_server.rs` |
-| `task18_negative` | `sd_probe.rs` (SD probe classification only) |
+| `settings` | `firmware/src/settings.rs` (knob parsing, `RECORD_MODE`) |
+| `task14_net` | `net/session.rs`, `net/net.rs` (credentials, backoff, SNTP policy) |
+| `api_contract` | `fileserver/{http,router,json,body,path,range}.rs` pure functions, plus an optional live board driver |
+| `e2e_rtsp` | host RTSP client and SDP parser (the live stream test self-skips without `ESP32_RTSP_URL`) |
+| `analyze_stream`, `stream_capture` | harness analyser and capture tooling |
 
-`camera.rs`, `sensor.rs`, `mic.rs`, `storage.rs` (mount/clock/throughput),
-`runtime.rs` and `main.rs` have **no host target** — they import `esp_idf_*`
-unconditionally. Their unit tests are compile-checked only for the espidf
-target and need a board to run.
+`media`, the storage hardware path, the `net` device glue, `fileserver::{server,status}`
+and `app`/`main` have no host target: they import `esp_idf_*` or own sockets and
+threads. Their evidence has to come from the device.
+
+## Failure Table
 
 | Area and trigger | Log or diagnostic (source-verified) | Recovery or degradation | Coverage or blocker |
 |---|---|---|---|
-| Camera initialization fails, including sensor probe, PSRAM allocation, or DMA setup | `CameraError::Init` renders `esp_camera_init failed: esp_err {e:#x} ({})`; runtime adds `boot: FATAL: {message}: {error}` (the caller passes `camera initialization failed`) | Fatal: the runtime loops on a 60 s sleep and never serves or records | `camera.rs` is device-target only; no board run |
-| Camera returns no frame | `GrabError::NoFrame` renders `no frame ready (esp_camera_fb_get returned NULL)`; runtime logs `boot: camera frame dropped: {error}` for that tick | Drop this capture tick and keep the driver alive; the runtime loop continues | Device-only module. The connected board has returned NULL on every grab, so this path is observed but not a host test |
-| Camera frame is short or lacks trailing `FF D9` | `GrabError::InvalidFrame` renders `frame rejected: buffer does not end with JPEG EOI (FF D9)`; `frames_rejected` increments; runtime logs `boot: camera frame dropped: {error}` | Return the buffer to the driver pool, forward nothing, keep looping | EOI classifier has unit tests in `camera.rs`, but they run only on the espidf target; no board DMA test exists |
-| Sensor PID is not OV3660 `0x3660` | One `sensor: PID={:#x} addr={:#x} {} class={:?} frames_grabbed={} frames_rejected={}` line, then `WARNING: sensor PID={:#x} ({}, class={:?}) is not the expected OV3660 (PID={:#x}) — continuing with the detected driver, do not assume OV3660 registers` | Continue with the detected driver; callers must not assume OV3660 registers | `sensor.rs` is device-target only. HIL PID read passes on the connected board (OV3660, `0x3660`, addr `0x3c`); no host test of the pure classifier |
-| Sensor driver is not initialized | `ERROR: sensor identity unavailable: {}`; runtime adds `boot: WARNING: sensor probe failed: {error}` | Return `SensorError::NotInitialized`, never panic | Device-target only; runtime ordering exists but no board run proves it |
-| SD card is absent or the candidate CS pin is wrong | Per-pin `storage: probe CS={} verdict={}`, aggregate `storage: CardProbe={} state={}`, then `storage: ERROR: CardProbe=Absent state=absent` (the rest of the line says MISO was all-ones on every candidate pin and that storage is disabled, not a mount failure); runtime logs `boot: WARNING: SD storage unavailable: {error}` | Disable recording and keep streaming when the network path is available | Probe/classification logic is now host-tested in `task18_negative`; real GPIO probing is board-only |
-| SD card is found but mount or volume is invalid | `StorageError::FormatOrVolume` renders `card present on {cs} but the volume did not mount at {stage}` followed by `format/volume error, not an absent card ({detail})` | Disable recording; do not retry the other CS after a confirmed card | Error mapping is source-verified; FAT mount and SD writes are board-pending |
-| SD transfer or negotiated clock is unsuitable | `storage: clock measured requested={} kHz real={} kHz (sdspi_host_get_real_freq)`, `storage: trial @{} kHz:`, then `StorageError::LadderExhausted` if every rung fails | Retune 40 → 20 → 10 MHz; if the path still fails, disable recording | Clock-ladder logic lives in device-only `storage.rs`; throughput acceptance requires a real card and explicit SD-write approval |
-| **New observed defect:** the raw probe detects a card, then `sdmmc_card_init` is rejected | `StorageError::CardInit` renders `sdmmc_card_init failed on {cs} after identification: {source}`; on the connected board the observed line ends `ESP_ERR_NOT_SUPPORTED` | Currently the typed error propagates; runtime logs `boot: WARNING: SD storage unavailable: {error}` and disables recording. **Not fixed** | **Open defect.** Occurs after the raw CMD8/ACMD41 probe but **before any filesystem code** (`Fatfs::new_sdcard` / mount / format are never reached). Root cause unknown (card, SPI mode/timing, or driver); see "Open Defects" below |
-| SD becomes full, is removed, or a segment cannot open | `RecorderError::SegmentOpen` renders `recorder: cannot open segment {} ({}): {source}`, `RecorderError::Write` renders `recorder: write failed on segment {} ({}): {source}`, `RecorderError::Stopped` renders `recorder: stopped: {reason}` | Roll at most once under `ErrorPolicy::Roll`, closing the prior segment cleanly; stop with a typed error if the next cannot open | Recorder error/roll policy is host-tested in `task10_recorder`; real SD failure injection is not |
-| Recorder reaches its AVI 1.0 ceiling or segment limit | `MuxerError::SegmentFull` — checked before the offending packet is written | Finish the current independent AVI and open the next name; never write past the limit | Host-tested in `task10_recorder`; no board recording exists |
-| Microphone setup or enable fails | `MicError::Init` renders `PDM RX init failed: {e}`; `MicError::Enable` renders `PDM RX enable failed: {e}`; runtime logs `boot: WARNING: microphone unavailable: {error}` | Continue video-only; `audio_enabled=false` is reported in `boot: ready recording={} audio={} rtsp={}` | Error types are source-verified; `mic.rs` is device-target only |
-| Microphone DMA times out or returns a short frame | `WARNING: mic read timeout after {waited_ms} ms — frame dropped (task alive)` or `WARNING: mic short read {got}/{expected} bytes — frame dropped` | Drop the incomplete frame, preserve sample alignment, sleep 20 ms and retry | Pure audio-quality processing is host-tested; PDM capture needs board verification |
-| Microphone driver read fails | `MicError::Read` renders `PDM RX read failed: {e}`; the task logs `ERROR: {e} — retrying in 20 ms (task neither blocks nor spins)` | Keep the capture task alive and retry after a bounded sleep | Device-target only; no PDM HIL result |
-| Microphone receiver is dropped | `mic: frame receiver dropped — capture task exiting after {} frames` | End the dedicated capture task cleanly | Device-target only; runtime ownership is pending |
-| Wi-Fi credentials are absent or invalid | `NetError::SsidInvalid` renders `SSID length {len} outside 1..=32 bytes`; `NetError::PasswordInvalid` renders the corresponding password message; runtime logs `boot: WARNING: invalid Wi-Fi credentials: {error}` or `boot: Wi-Fi credentials unavailable; network disabled` | Take the no-network branch; recording can still run | Validation and policy are host-tested in `task14_net`; no credential literal belongs in this repository |
-| Wi-Fi start, connect, or station netif fails | `NetError::WifiStart`/`NetError::WifiConnect`/`NetError::WifiNetifUp` diagnostics; runtime logs `boot: WARNING: network unavailable: {error}` | Retry with 1, 2, 4, 8, 16, then 30 second backoff; streaming stays disabled until the link returns | Backoff maths is host-tested in `task14_net`; board Wi-Fi is pending and credentials are unavailable here |
-| Wi-Fi link drops during a session | Session receives `Event::WifiLost` and logs the reconnect attempt/backoff | Stop capture, tear down the server, wait for `Event::WifiRestored` before accepting a new session | Session state machine is host-tested; live reconnect is blocked by hardware |
-| SNTP does not sync within 90 seconds | `WARN sntp: not synced ({reason}); is_synced=false, RTCP Sender Reports stay suppressed` | Keep `is_synced=false`, switch to the fallback after 120 s, and suppress RTCP Sender Reports; never fabricate wall time | Clock policy is host-tested in `task14_net`; live SNTP is board/network pending |
-| mDNS or artifact HTTP service fails | `NetError::MdnsInit` (`EspMdns::take failed`), `NetError::MdnsConfig`, or `NetError::ArtifactServer`; runtime logs `boot: WARNING: network unavailable: {error}` | Network bring-up fails typed; discovery or artifact retrieval is unavailable while streaming may continue where possible | Error mapping exists; the runtime boot path now starts these services, but no board run verifies them |
-| RTSP client sends malformed request or oversized frame | `RequestError::MalformedRequestLine`/`MissingCSeq`/`InvalidCSeq` map to 400; `DecodeError::HeaderTooLarge`/`BodyTooLarge`/`MalformedHeader` close the connection | Send RTSP 400 when framing permits, otherwise close; never panic | Host matrix in `task11_rtsp` covers parser errors, non-numeric length, non-UTF-8 headers, and 8 KiB header / 64 KiB body limits; live socket test is pending |
-| RTSP client asks for an unsupported method, path, track, or transport | 405, 404, 404, or 461 according to the RTSP status contract | Refuse only the invalid request; a second active client receives 453 without disturbing the first | Host RTSP matrix covers status behaviour; board listener bring-up is blocked |
-| RTSP control connection is idle too long or disconnects | `on_disconnect` returns the teardown actions; the service timeout path runs the same handler | Stop capture and tear down the active server session from the disconnect action | Session/service behaviour is host-tested (socket loopback marked HIL); live RTSP is approval-gated |
-| RTP send hits a slow client or low DMA memory | `capture backoff: DMA free {free} B < {} B floor (plan (b))`, `capture backoff: DMA largest block {largest} B < {} B floor (plan (b))`, or `capture backoff: slow-client cooldown until {until_ms} ms (plan (c), frames dropped not queued)` | Back off capture for the cooldown or suspend below the DMA thresholds; drop frames instead of queueing unbounded data | Policy is host-tested in `task14_net`; the capture-to-sender call path needs a board |
-| Camera input is not a supported baseline JFIF or contains corrupt marker lengths | Typed `JfifError` or `PacketizeError::Jfif` | Emit no RTP packet for the frame and leave sequence/timestamp state unchanged | RFC 2435 negative cases and FFmpeg/GStreamer host gates pass |
-| Audio input cannot be represented by the fixed track buffer | Typed track error is returned before emission | Emit no malformed packet; preserve the prior RTP state | PCMU packet size, payload type, and timestamp tests pass on the host |
-| Current runtime boot path is invoked | `boot: ready recording={} audio={} rtsp={}` after ordered bring-up; each subsystem failure logs `boot: WARNING:` followed by the specific message above and degrades | Camera failure is fatal; SD/mic/network/RTSP failures disable only their feature. On the connected board, camera frames are NULL and SD init is rejected, so the observed state is no stream and no recording | Not host-testable (`runtime.rs`/`main.rs` import `esp_idf_*`); F3 remains open |
+| Peripherals cannot be taken | `boot: FATAL: peripheral initialization failed: <error>` | Fatal: the runtime thread parks on a 60 s sleep and serves nothing | Device only; `app.rs` |
+| SPI2 bus creation fails | `boot: WARNING: SD SPI initialization failed: <error>` | Storage is skipped; Wi-Fi and streaming still start | Device only |
+| No card, or the card is wired to an unknown pin | Per-pin `storage: probe CS=<pin> verdict=<tag>`, aggregate `storage: CardProbe=<probe> state=<state>`, then `storage: ERROR: CardProbe=Absent state=absent`; the error renders `no candidate CS pin selected a card (MISO all-ones on every pin)` | Recording is disabled; streaming continues | Probe classification is host-testable; GPIO probing is device only |
+| A card is identified but `sdmmc_card_init` rejects it | `sdmmc_card_init failed on <cs> after identification: <source>` (`StorageError::CardInit`) | Recording is disabled; the boot line reports `recording=off` | Observed on the board (`ESP_ERR_TIMEOUT`); not host-testable |
+| A card is present but the volume does not mount | `card present on <cs> but the volume did not mount at <stage>: format/volume error, not an absent card (<detail>)` | Recording is disabled; the other chip-select pin is not tried after a confirmed card | Error mapping is source-verified; mount behaviour is device only |
+| The card is stuck: the raw probe still identifies it (`CMD8` returns SDv2) but `ACMD41` times out on every attempt, every boot | The probe logs `storage: probe CS=... verdict=detected`, then bring-up fails with `sdmmc_card_init failed on <cs> after identification: ESP_ERR_TIMEOUT`; no mount, format or clock ladder runs | Recording and file download are unavailable for that boot; HTTP status and `/api/v1/files` still answer with empty storage. Recovery is physical: re-seat the card or power-cycle the board | Observed on the connected board; diagnosis in `.omo/evidence/sd-diagnosis.txt` |
+| Every clock rung is rejected by the qualification battery | `storage: clock measured requested=<khz> kHz real=<khz> kHz`, `storage: trial @<khz> kHz: 4 MiB write = <bps> B/s (floor 262144 B/s) unstable=<bool> (<reason>)`, then `clock ladder exhausted after [...] kHz; last trial: <reason>` | Lower the rung 40 -> 20 -> 10 MHz; if all fail, recording is disabled | Device only; requires a card |
+| A rung writes but reads back differently | `read-back of <path> differs from what was written at offset <n>` (`StorageError::DataMismatch`) | That rung is rejected and the ladder falls back | Device only |
+| Wi-Fi credentials are absent from the build | `boot: Wi-Fi credentials unavailable; network disabled` | No network, so no LAN client can reach RTSP or HTTP; recording can still run locally | Host-tested parsing; the boot branch is device only |
+| Wi-Fi credentials are invalid | `boot: WARNING: invalid Wi-Fi credentials: <error>`; the error names the SSID or password length rule | Take the no-network branch | Host-tested in `task14_net` |
+| Wi-Fi bring-up fails before the supervisor exists | `boot: WARNING: network unavailable: <error>` | No network for that boot; RTSP and the file server bind but are unreachable from the LAN | Device only |
+| No station IP arrives within 60 s | `boot: waiting for station IP (<n>s elapsed)` every 5 s, then `boot: WARNING: no station IP after 60s; starting pipeline anyway` | The pipeline and server start with `0.0.0.0` as the printed address; they are unreachable until an address exists | Device only |
+| The file server cannot initialise LwIP | `boot: WARNING: fileserver unavailable: network stack unavailable: <error>` | Server stays down; RTSP and the pipeline are unaffected | Typed error path is source-verified; live failure is device only |
+| The file server cannot bind its port | `boot: WARNING: fileserver unavailable: listen socket unavailable: <error>` | Server stays down; RTSP keeps the media path alive | Device only; a conflicting port is the trigger |
+| Fewer than 64 KiB of internal SRAM remain after the server stacks | `boot: WARNING: fileserver unavailable: internal heap too small: <free> bytes free, <required> required` | Server stays down by design, so it cannot starve the media pipeline. This is the measured guard path, not a crash | Proven on the board during the memory ladder (`.omo/evidence/task-22-firmware-slim-and-file-server/`) |
+| A second request arrives while the single worker is busy | `filesrv: 503 busy` on the accept thread; the client receives `HTTP/1.1 503` with a JSON `ApiError` body | The connection is refused at once instead of waiting; the active download is not disturbed | Test lives in the crate's device test binary; see Open Defects for run status |
+| The request head is oversized, incomplete or silent | `filesrv: - - -> 400 <bytes>` and a `400` response; a silent connection is closed after the 10 s read timeout | One connection is dropped; the worker slot is released | Test lives in the crate's device test binary; see Open Defects for run status |
+| A download path contains `..`, NUL, bad escapes or an empty segment | The response is `404`; the log line still records the method and path | No file is opened and no existence information leaks | Pure `path::map` tests, host and device |
+| A `Range` header selects no byte | `416` with `Content-Range: bytes */<total>` and a zero-length body | The client can retry with a valid range; the server stays up | Pure `range::parse` tests plus the contract test |
+| The card cannot be read during a download | `filesrv: body aborted: <error>` and a `500` JSON body when the failure happens before the head; a short source read is a typed error | The response is not silently truncated as a successful `200` | Device only for real card errors |
+| Status is requested on a boot with no card | `200` JSON with `"mounted":false`, `total_bytes`, `free_bytes` and `clock_khz` all `0`, `recording_file:null`; the SD clock FFI is never called and the chip does not fault | The status endpoint stays available and the board keeps answering | Previously crashed the chip; fixed and proven on a card-less boot (`.omo/evidence/task-23-firmware-slim-and-file-server/`) |
+| The on-die temperature sensor cannot be installed, enabled or read | The status body carries `"temperature_c":null` and the gatherer reports the sensor as unavailable in its log | The rest of the status document still answers | Device only; no host target for `status.rs` |
+| `RECORD_MODE` is empty or misspelled | `boot: WARNING: RECORD_MODE="<text>" is not one of both\|stream\|record; using both` | The build proceeds with the `both` default; the warning is the only signal | Pure parser is host-tested in `settings` |
+| The AVI muxer cannot be configured or linked | `pipeline: WARNING: recording unavailable: <error>`, then the boot line reports `recording=off` | RTSP still starts; the muxer is skipped | Device only |
+| The muxer fails to start after being linked | `pipeline: WARNING: muxer start failed: <error>; continuing without recording` | RTSP continues, `recording=off` | Device only |
+| The vendor camera driver drops a frame as `NO-SOI` or `NO-EOI` | The EOI patch trims the frame to the real EOI by scanning forward from the SOI; a real SOI failure logs `cam_hal: NO-SOI len=<n> head=<8 bytes>` on the first reject and every 100th | The frame is dropped and capture continues. If the patch did not apply, the driver falls back to its tail-only EOI search and the plain warning | Device only; the vendor driver has no host target |
+| The RTSP service fails to start | `pipeline: rtsp start returned err=<error>` from the start thread | The readiness line still names the configured RTSP URL. It is a configuration report, not proof that port 554 accepts connections | Device only |
+| LwIP runs out of sockets or listening-TCP entries | The file server logs `listen socket unavailable: <error>`; the RTSP start thread logs `pipeline: rtsp start returned err=<error>` | `sdkconfig.defaults` raises `CONFIG_LWIP_MAX_SOCKETS` and `CONFIG_LWIP_MAX_LISTENING_TCP` to 16. If the limit is still hit, the affected listener stays down and the rest of the boot continues | Device only; limit values are build-verified |
+| Pipeline construction fails at any other step | `boot: WARNING: GMF pipeline unavailable: <error>`, where the error names the step (`i2c_bus`, `capture_setup`, `rtsp_service`, and so on) | HTTP stays up; streaming and recording are absent | Device only |
+| Recording and streaming run in the same boot (`RECORD_MODE=both`) | No warning is emitted; the risk is behavioural. The vendor muxer and the RTSP sink both consume the capture service, and starvation has not been measured on this board | Use `RECORD_MODE=stream` to stream only, or `RECORD_MODE=record` to record only, when the default misbehaves | **Unmeasured.** No 60 s recording has been produced by this tree |
+| A build patch cannot find its vendor source block | `cargo:warning=... patch skipped` or `... may not be linked` during `cargo build` | The build continues with the vendor behaviour (tail-only EOI scan, plain `NO-SOI`, vendor JPEG quality) | Build-time only; messages are in `build.rs` |
 
-## Open Defects
+## Open Defects and Unmeasured Behaviour
 
-1. **SD init rejects a card the raw probe detects — `ESP_ERR_NOT_SUPPORTED`.**
-   The probe sequence completes identification `storage: probe CS={} -> detected (` and then `sdmmc_card_init` fails with the typed
-   `StorageError::CardInit`, observed as
-   `sdmmc_card_init failed on {cs} after identification: {source}` (observed suffix `ESP_ERR_NOT_SUPPORTED`).
-   This happens **before any filesystem code**: `Fatfs::new_sdcard`, mount,
-   format, and the clock ladder are never reached. The device therefore
-   disables recording while streaming can continue. Not fixed here; requires
-   board/card investigation and explicit SD-write approval.
+1. **The SD card is stuck after an aborted format.** The raw probe identifies
+   it with `CMD8` but `ACMD41` times out on every attempt, so bring-up never
+   reaches the filesystem. A physical re-seat or full power-cycle is required.
+   Diagnosis: `.omo/evidence/sd-diagnosis.txt`.
+2. **Recording during streaming is unmeasured.** `RECORD_MODE=both` is the
+   default and compiles, but whether the vendor muxer starves the RTSP sink, or
+   whether the file ends up empty, has not been observed. The two single-purpose
+   modes are the documented fallback and must not be described as tested either.
+3. **No recording has been downloaded over HTTP.** The ranged path has device
+   tests and an in-process contract run, but no real file has crossed the wire.
+   The test board's card is unreadable, so `/api/v1/files` returns an empty list
+   and the live contract exercises the documented `404` instead of a transfer.
+4. **The device test gate is not clean.** The serial runner is implemented and
+   the binaries build, but the last recorded device run ended in a task stack
+   overflow, and the runs that needed the card could not mount it. No device run
+   has produced `VERDICT 0`; the only `VERDICT 0` on record is the runner's
+   synthetic self-test.
+5. **`clock_khz` on a mounted volume is unverified.** The field reads the SDMMC
+   host slot, while this firmware mounts through SDSPI. The card-less branch is
+   safe (it returns `0`); the mounted branch has not run on hardware.
 
 ## Reading Test Status
 
-Host tests prove pure parsing, state transitions, packet layout, synthetic AVI
-output, the SD probe classifier, and every typed diagnostic string quoted
-above that lives in a host-compiled module. They cannot prove GPIO wiring,
-camera DMA, PDM signal quality, FAT mount behaviour, negotiated SD frequency,
-lwIP socket acceptance, Wi-Fi, SNTP, or an end-to-end client. The device
-unit-test gate has not produced a clean `test result:` line, there is no HIL
-suite, and no end-to-end SD or RTSP smoke test has passed. Those items must
-remain visibly pending.
+The host suite proves the pure layers: settings parsing, the net policy, HTTP
+and path parsing, range arithmetic, JSON bodies, chunk planning, the in-process
+API contract and the harness analyser. It cannot prove GPIO wiring, SD bring-up,
+the card clock, LwIP socket acceptance, the file server's threads, Wi-Fi, mDNS,
+camera DMA or a real recording. Those require the board and, for anything that
+formats or writes the card, a deliberate device run. Commands and their expected
+verdicts are listed in `README.md`.
