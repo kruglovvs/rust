@@ -317,6 +317,15 @@ pub const MIN_WRITE_BYTES_PER_SEC: u64 = 262_144;
 /// phase before raising the bus to `speed_khz`.
 const PROBE_BAUD_HZ: u32 = 400_000;
 
+/// Warm-up burst clocked with CS **deasserted** before `CMD0`.
+///
+/// SD Physical Layer §6.4.1: the card needs **at least 74 clock cycles with
+/// CS high** to finish its internal power-up before the first command. Eight
+/// bytes (64 clocks) is four clocks short, and a card that is not fully
+/// powered up in SPI mode can answer `CMD8` with garbage and then stop
+/// answering. Ten bytes = 80 clocks clears the requirement with margin.
+const BUS_IDLE_BYTES: usize = 10;
+
 /// Clock ladder for plan (e): start at 40 MHz, then 20, then 10.
 pub const CLOCK_LADDER_KHZ: [u32; 3] = [40_000, 20_000, 10_000];
 
@@ -715,13 +724,14 @@ impl<'d> RawSd<'d> {
         Ok(Self { dev, cs })
     }
 
-    /// Clock 8 bytes with chip-select **deasserted** and report whether the
-    /// window is all-ones.
+    /// Clock [`BUS_IDLE_BYTES`] with chip-select **deasserted** and report
+    /// whether the window is all-ones.
     ///
     /// Plan (b): with the card deselected its MISO is pulled high, so every
-    /// byte must be `0xFF`. This is the bus-idle sanity read.
+    /// byte must be `0xFF`. This is the bus-idle sanity read, and it doubles
+    /// as the spec's ≥ 74-clock power-up burst before `CMD0`.
     fn bus_idle_is_high(&mut self) -> Result<bool, StorageError> {
-        let mut buf = [0xFFu8; 8];
+        let mut buf = [0xFFu8; BUS_IDLE_BYTES];
         self.clock(&mut buf, false)?;
         Ok(is_all_ones(&buf))
     }
@@ -1606,6 +1616,17 @@ mod tests {
         // Bit 6 (start) is forced on, bit 5 (transmission) stays clear.
         assert_eq!(encode_command(0xFF, 0, 0x01)[0] & 0xC0, 0x40);
         assert_eq!(encode_command(41, 0, 0x01)[0], 0x40 | 41);
+    }
+
+    #[test]
+    fn bus_idle_burst_meets_the_spec_74_clock_rule() {
+        // SD Physical Layer: at least 74 clocks with CS high before the first
+        // command. 8 bytes (64 clocks) is the historical bug this guards.
+        assert!(
+            BUS_IDLE_BYTES * 8 >= 74,
+            "{BUS_IDLE_BYTES} bytes = {} clocks < 74",
+            BUS_IDLE_BYTES * 8
+        );
     }
 
     // --- all-ones / R1 location --------------------------------------------
