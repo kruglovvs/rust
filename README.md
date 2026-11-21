@@ -12,14 +12,17 @@ network.
 |---|---|
 | SoC | ESP32-S3R8, 8 MiB octal PSRAM, 8 MiB flash, OV3660 DVP camera, PDM mic |
 | Media | Espressif ADF/GMF: `esp_capture_service`, `esp_rtsp_service` (MJPEG + AAC-LC), optional `esp_muxer_service` (AVI) |
-| HTTP | Hand-written HTTP/1.1 on the board's `std` sockets, JSON plus byte-range file bodies |
+| HTTP | ESP-IDF `esp_http_server` (`EspHttpServer`), JSON plus byte-range file bodies |
 | Language | Rust (`std`, ESP-IDF target `xtensa-esp32s3-espidf`) |
 | Bindings | `esp-idf-sys` bindgen over the C headers. No C or C++ shim source |
 | Storage | FAT32 only, one mount at `/sdcard`, one boot qualification battery |
 
-The HTTP server is not `EspHttpServer`. The IDF server does not publish a
-`Content-Length` while a body is still streaming and has no `Range` support, so
-a large recording could not be resumed or sized in advance.
+The HTTP layer is ESP-IDF's `esp_http_server`, wrapped as `EspHttpServer`. Our
+code is the pure decision in `firmware/components/fileserver/src/plan.rs` plus
+the thin handlers in `server.rs`; `Range` stays ours because httpd has no range
+support. The binding sends every non-empty body through `httpd_resp_send_chunk`,
+so a JSON or file body is `Transfer-Encoding: chunked` with no `Content-Length`;
+only an empty body (`HEAD`, `416`) carries `Content-Length: 0`.
 
 ## Layout
 
@@ -120,8 +123,9 @@ stream or `RECORD_MODE=record` to capture. See Known Limitations.
 
 ## HTTP API
 
-The server answers one request per connection on port 80. It is read-only
-and JSON only.
+The server listens on port 80. It is read-only, serves JSON plus the recording
+bytes, and keeps an HTTP/1.1 connection open for further requests (keep-alive)
+instead of forcing one request per connection.
 
 | Method | Path | Body |
 |---|---|---|
@@ -132,11 +136,17 @@ and JSON only.
 | `GET`, `HEAD` | `/api/v1/files/{path}` | one file, whole or ranged |
 
 `/api/v1/files` lists the entries directly below `/sdcard/rec`, sorted by name,
-at most 200. A download sets an exact `Content-Length` and
+at most 200. A download is `application/octet-stream` with
 `Accept-Ranges: bytes`; a single `Range` header gets `206` with `Content-Range`,
 and an unsatisfiable range gets `416` with `Content-Range: bytes */<total>` and
-no body. Path traversal, backslashes, NUL bytes and bad escapes are rejected
-with `404`.
+an empty body. Every non-empty body, JSON or file, is `Transfer-Encoding:
+chunked` with no `Content-Length`; only an empty body (`HEAD`, `416`) carries
+`Content-Length: 0`. Path traversal, backslashes, NUL bytes and bad escapes are
+rejected with `404`. Every response a handler produces is JSON: a URI that
+matches no route is a `404` `{"error":...}` body from the catch-all handler,
+and `POST`, `PUT`, `DELETE`, `PATCH` or `OPTIONS` is a `405` JSON body. No
+response is HTML. A request httpd cannot parse is rejected before any handler
+runs.
 
 The status object always carries the same 17 properties:
 
@@ -173,15 +183,19 @@ curl -r 0-1023 -o first-kib.bin http://<board-ip>/api/v1/files/rec/muxed_0.avi
 
 `muxed_0.avi` is the first segment the vendor muxer writes; get the exact name
 from `/api/v1/files`. If the first transfer is interrupted, the second resumes
-it. The third asks for the first KiB and expects `206` with
+it: `curl -C -` asks from the local file size and the server answers `206` with
+`Content-Range`, so the resume works even though the download has no
+`Content-Length`. The third asks for the first KiB and expects `206` with
 `Content-Range: bytes 0-1023/<total>`.
 
-The server has one accept thread and one worker. When the worker is busy a new
-connection is refused at once with `503` and a JSON error, so a status request
-that arrives during a download gets `503` rather than waiting behind it. Each
-connection has a 10 s read timeout, a 10 s write timeout and an 8 KiB
-request-head cap. The server declines to start when fewer than 64 KiB of
-internal SRAM remain after its own stacks.
+Concurrency is capped by httpd, not by our code: `EspHttpServer` is created
+with `max_open_sockets: 2`, and a request that arrives while a download is in
+flight is limited by that socket cap (it waits in httpd's listen backlog until a
+session frees) rather than answered `503` by us; no handler emits `503`. An idle
+keep-alive connection keeps its session until the client closes it. The socket
+read and write timeouts are 5 s, the request head is bounded by ESP-IDF's
+`HTTPD_MAX_REQ_HDR_LEN` (1 KiB in this build), and the server declines to start
+when fewer than 64 KiB of internal SRAM remain after httpd has started.
 
 ## Configuration
 

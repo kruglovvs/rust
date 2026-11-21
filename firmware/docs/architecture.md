@@ -144,37 +144,45 @@ file; a build without them still compiles, warns, and boots with no network.
 
 ## File Server
 
-`firmware/components/fileserver` owns everything between the listen socket and
-the card: HTTP parsing, path mapping, `Range` handling, routing, JSON bodies,
-status gathering and file streaming. `app.rs` only calls `start`.
+`firmware/components/fileserver` wraps ESP-IDF's `esp_http_server`
+(`EspHttpServer`). Our code is the pure decision in `src/plan.rs` plus the thin
+handlers in `src/server.rs` that execute it; path mapping, `Range` handling,
+routing, JSON bodies, status gathering and file streaming are ours. `app.rs`
+only calls `start`.
 
 Connection model:
 
-- One accept thread with an 8 KiB stack accepts and nothing else. It never reads
-  a request byte.
-- One worker thread with a 16 KiB stack is created once and lives for the life
-  of the server. At most one connection is served at a time.
-- When the worker is busy the accept thread writes `HTTP/1.1 503` with the JSON
-  error body and closes, so a long download never makes the next client wait.
-- Each connection gets a 10 s read timeout and a 10 s write timeout, at most
-  8192 bytes of request head, one request, one response, and then close. Every
-  response carries `Connection: close`.
-- After the threads exist, `start` refuses to run when fewer than 64 KiB of
+- `EspHttpServer` runs httpd in its own task with a 16 KiB stack,
+  `max_open_sockets: 2`, wildcard URI matching and the LRU purge disabled.
+  Concurrency is capped by httpd's socket count, not by application code: a
+  request that arrives while a download is in flight waits in the listen backlog
+  until a session frees, and no handler answers `503`.
+- Sessions are persistent. The server never sends `Connection: close`; one
+  connection can carry several requests, and an idle keep-alive client keeps its
+  session until it closes the socket.
+- The socket read and write timeouts are 5 s (the binding hardcodes them), and
+  the request head is bounded by ESP-IDF's `HTTPD_MAX_REQ_HDR_LEN` (1 KiB here).
+- After the server exists, `start` refuses to run when fewer than 64 KiB of
   internal SRAM remain (`Error::Budget`). The floor is measured against the
   media pipeline's own footprint, not invented.
-- One log line per request: `filesrv: <method> <path> -> <status> <bytes>`, and
-  `filesrv: 503 busy` for a refused connection.
+- One log line per request: `filesrv: <method> <path> -> <status> <bytes>`.
 
-Request handling is a chain of pure functions: `http::parse`, `router::route`,
-`json::status_body` / `json::list_body`, `path::map`, `range::parse` and
-`body::write_body`. A malformed download path becomes `404` so it never reveals
-whether a file exists. Files are streamed in 4 KiB chunks; the whole file is
-never buffered. A response carries an exact `Content-Length` and
-`Accept-Ranges: bytes`; a single range produces `206` with `Content-Range`, an
-unsatisfiable range produces `416` with `Content-Range: bytes */<total>` and no
-body, and a multi-range header is ignored and answered with the whole file.
+Request handling is one pure decision plus a write: `plan::plan` selects the
+status, headers and body through `router::route`, `path::map`, `range::parse`,
+`json::status_body` / `json::list_body` and `body`; `server.rs` then calls
+`initiate_response` and writes the body. A malformed download path becomes `404`
+so it never reveals whether a file exists. Files are streamed in 4 KiB chunks;
+the whole file is never buffered. Every body goes through httpd's chunk API, so
+a non-empty response is `Transfer-Encoding: chunked` with no `Content-Length`,
+while an empty body (a `HEAD` or a `416`) carries `Content-Length: 0`. A
+download advertises `Accept-Ranges: bytes`; a single range produces `206` with
+`Content-Range`, an unsatisfiable range produces `416` with
+`Content-Range: bytes */<total>` and no body, and a multi-range header is
+ignored and answered with the whole file.
 
-The API is read-only and JSON only.
+The API is read-only; every response a handler produces is JSON, except the
+recording body. A request httpd cannot parse is rejected before any handler
+runs.
 
 | Method | Path | Response |
 |---|---|---|
@@ -183,6 +191,13 @@ The API is read-only and JSON only.
 | `GET` | `/api/v1/files` | entries below `<mount>/rec`, at most 200 |
 | `GET` | `/api/v1/openapi.json` | the embedded OpenAPI 3.0.3 document |
 | `GET`, `HEAD` | `/api/v1/files/{path}` | one file, full or ranged |
+| `GET`, `HEAD` | any other URI | JSON `404` (`ApiError`) |
+| `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS` | any URI | JSON `405` (`ApiError`) |
+
+Registered order is matching order: `server.rs` registers the specific routes
+first, then `GET`/`HEAD` on `/*` and the five unserved methods on `/*`. The
+catch-alls therefore only see what nothing else claimed, and httpd's own HTML
+error pages are unreachable for a request it can parse.
 
 The status document always carries the same 17 properties: `version`, `build`,
 `uptime_s`, `ip`, `hostname`, `mounted`, `total_bytes`, `free_bytes`,

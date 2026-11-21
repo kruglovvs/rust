@@ -3,7 +3,7 @@
   "info": {
     "title": "esp32s3-av firmware API",
     "version": "1.0.0",
-    "description": "Read-only JSON API of the ESP32-S3 audio/video firmware: device status, the SD-card recording listing, the OpenAPI document itself, and byte-range file download. No HTML, no UI, no upload. The API is unauthenticated and intended for the local network only. Every JSON body is `application/json`; the only non-JSON body is the recording file itself, served as `application/octet-stream` with `Accept-Ranges: bytes`. `temperature_c` is a reading of the on-die ESP32-S3 temperature sensor reported with one decimal; it is `null` when the sensor could not be installed, enabled or read at runtime, which is a sensor failure and not a permanently documented limitation."
+    "description": "Read-only JSON API of the ESP32-S3 audio/video firmware: device status, the SD-card recording listing, the OpenAPI document itself, and byte-range file download. No HTML, no UI, no upload. The API is unauthenticated and intended for the local network only. Every JSON body is `application/json`; the only non-JSON body is the recording file itself, served as `application/octet-stream` with `Accept-Ranges: bytes`. Bodies are framed by ESP-IDF's HTTP server: a non-empty body, JSON or file, is streamed with `Transfer-Encoding: chunked` and carries no `Content-Length`; only an empty body (`HEAD`, `416`) carries `Content-Length: 0`. A URI outside every registered route is answered with the same JSON `ApiError` 404, and `POST`, `PUT`, `DELETE`, `PATCH` or `OPTIONS` on any route is answered with a JSON `ApiError` 405; every response a handler produces is JSON. A request httpd cannot parse is rejected by httpd before any handler runs. `temperature_c` is a reading of the on-die ESP32-S3 temperature sensor reported with one decimal; it is `null` when the sensor could not be installed, enabled or read at runtime, which is a sensor failure and not a permanently documented limitation."
   },
   "servers": [
     {
@@ -35,7 +35,8 @@
                 "schema": { "$ref": "#/components/schemas/Index" }
               }
             }
-          }
+          },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" }
         }
       }
     },
@@ -53,7 +54,8 @@
                 "schema": { "$ref": "#/components/schemas/Status" }
               }
             }
-          }
+          },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" }
         }
       }
     },
@@ -71,7 +73,8 @@
                 "schema": { "$ref": "#/components/schemas/FileList" }
               }
             }
-          }
+          },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" }
         }
       }
     },
@@ -92,7 +95,8 @@
                 }
               }
             }
-          }
+          },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" }
         }
       }
     },
@@ -110,7 +114,7 @@
       "get": {
         "tags": ["files"],
         "summary": "Download one recording",
-        "description": "Sends the file with an exact `Content-Length` and `Accept-Ranges: bytes`. With a single `Range: bytes=...` header the response is `206 Partial Content` and carries `Content-Range: bytes <start>-<end>/<total>`; a range that selects no byte is `416 Range Not Satisfiable` with `Content-Range: bytes */<total>` and a zero-length body. A multi-range request is ignored and the whole file is sent with `200`, which RFC 9110 section 14.2 permits. The body is streamed in 4 KiB chunks, never buffered whole.",
+        "description": "Sends the file as `application/octet-stream` with `Accept-Ranges: bytes`, streamed with `Transfer-Encoding: chunked` and no `Content-Length`. With a single `Range: bytes=...` header the response is `206 Partial Content` and carries `Content-Range: bytes <start>-<end>/<total>`; a range that selects no byte is `416 Range Not Satisfiable` with `Content-Range: bytes */<total>` and a zero-length body. A multi-range request is ignored and the whole file is sent with `200`, which RFC 9110 section 14.2 permits. The body is streamed in 4 KiB chunks, never buffered whole.",
         "operationId": "downloadFile",
         "parameters": [
           {
@@ -128,6 +132,10 @@
             "headers": {
               "Accept-Ranges": {
                 "description": "Always `bytes`.",
+                "schema": { "type": "string" }
+              },
+              "Transfer-Encoding": {
+                "description": "Always `chunked`; the server does not announce a `Content-Length` for a body.",
                 "schema": { "type": "string" }
               }
             },
@@ -147,6 +155,10 @@
               "Accept-Ranges": {
                 "description": "Always `bytes`.",
                 "schema": { "type": "string" }
+              },
+              "Transfer-Encoding": {
+                "description": "Always `chunked`; the server does not announce a `Content-Length` for a body.",
+                "schema": { "type": "string" }
               }
             },
             "content": {
@@ -155,15 +167,15 @@
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
           "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
           "416": { "$ref": "#/components/responses/RangeNotSatisfiable" }
         }
       },
       "head": {
         "tags": ["files"],
         "summary": "Download headers for one recording",
-        "description": "Identical status line and headers to the `GET` operation, with no body.",
+        "description": "The same status and the same `Accept-Ranges` / `Content-Range` headers as the `GET` operation, with an empty body. Because the body is empty, httpd frames the response with `Content-Length: 0` instead of `Transfer-Encoding: chunked`.",
         "operationId": "headFile",
         "parameters": [
           {
@@ -177,8 +189,8 @@
         "responses": {
           "200": { "description": "Whole-file headers, no body." },
           "206": { "description": "Range headers, no body." },
-          "400": { "$ref": "#/components/responses/BadRequest" },
           "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
           "416": { "$ref": "#/components/responses/RangeNotSatisfiable" }
         }
       }
@@ -370,16 +382,16 @@
       }
     },
     "responses": {
-      "BadRequest": {
-        "description": "The request head could not be parsed.",
+      "NotFound": {
+        "description": "No such file, a rejected download path, or a URI no route matches. Every 404 uses this JSON body.",
         "content": {
           "application/json": {
             "schema": { "$ref": "#/components/schemas/ApiError" }
           }
         }
       },
-      "NotFound": {
-        "description": "No such route, or no such file.",
+      "MethodNotAllowed": {
+        "description": "The method is not served on this URI. `POST`, `PUT`, `DELETE`, `PATCH` and `OPTIONS` are answered by the catch-all handler with this JSON body; no `Allow` header is sent.",
         "content": {
           "application/json": {
             "schema": { "$ref": "#/components/schemas/ApiError" }
@@ -387,7 +399,7 @@
         }
       },
       "RangeNotSatisfiable": {
-        "description": "The range selects no byte of the file. The response has a zero-length body, `Content-Type: application/octet-stream`, `Content-Length: 0` and `Content-Range: bytes */<total>`.",
+        "description": "The range selects no byte of the file. The response has a zero-length body, `Content-Type: application/octet-stream`, `Content-Length: 0` and `Content-Range: bytes */<total>`. An empty body is sent whole, so this response has no `Transfer-Encoding`.",
         "headers": {
           "Content-Range": {
             "description": "`bytes */<total>`.",

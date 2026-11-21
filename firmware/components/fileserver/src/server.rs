@@ -27,11 +27,14 @@
 //! # Server
 //!
 //! [`start`] brings LwIP up and creates one [`EspHttpServer`] with
-//! `max_open_sockets: 2`, `stack_size: 16 KiB`, `max_uri_handlers: 10` and
-//! wildcard URI matching. It then registers `GET` and `HEAD` for `/`,
-//! `/api/v1/status`, `/api/v1/files` and `/api/v1/openapi.json`, and for
-//! `/api/v1/files/*` last, because ESP-IDF refuses a handler that a registered
-//! wildcard already covers. Every handler runs [`crate::plan::plan`] and sends
+//! `max_open_sockets: 2`, `stack_size: 16 KiB`, `max_uri_handlers: 17` and
+//! wildcard URI matching. It then registers, in this order: `GET` and `HEAD`
+//! for `/`, `/api/v1/status`, `/api/v1/files` and `/api/v1/openapi.json`;
+//! `GET` and `HEAD` for `/api/v1/files/*`; then the fallbacks - `GET`/`HEAD`
+//! on `/*` for an unknown path, and `POST`, `PUT`, `DELETE`, `PATCH` and
+//! `OPTIONS` on `/*` for a method the API does not serve. Registered order is
+//! matching order, so the specific routes win and the catch-alls only see what
+//! nothing else claimed. Every handler runs [`crate::plan::plan`] and sends
 //! its result:
 //!
 //! - `initiate_response(status, reason, headers)` sets the status, the content
@@ -39,8 +42,9 @@
 //! - a JSON or static body is written in one `write_all`, a file in
 //!   [`crate::body::CHUNK`] pieces through [`crate::body::chunk_plan`] and the
 //!   [`crate::body::FileSource`];
-//! - a `HEAD`, a `416` and an error body are empty, so httpd answers
-//!   `Content-Length: 0`; every non-empty body is `Transfer-Encoding: chunked`.
+//! - a `HEAD` and a `416` are empty, so httpd answers `Content-Length: 0`;
+//!   every non-empty body - a JSON success or error body, or a file - is
+//!   `Transfer-Encoding: chunked`.
 //!
 //! The binding silently ignores a `Content-Length` passed to
 //! `initiate_response` and its `write_all` always uses `httpd_resp_send_chunk`,
@@ -48,11 +52,11 @@
 //! chunked, and `Range`/`Content-Range` in [`crate::plan`] are what make it
 //! resumable.
 //!
-//! A request whose URI is registered for another method is answered `405` by
-//! `httpd_find_uri_handler` in `components/esp_http_server/src/httpd_uri.c`,
-//! which is what [`crate::plan`] selects too; a URI no handler matches is
-//! `404`. An unparsable request never reaches a handler and gets httpd's own
-//! error response.
+//! Because the catch-alls cover every URI and every method in the fallback
+//! set, httpd's own HTML error pages are no longer reachable for a request it
+//! can parse: an unknown path is `404` and a wrong method is `405`, both with
+//! the JSON `ApiError` body from [`crate::plan`]. Only a request httpd cannot
+//! parse never reaches a handler and gets httpd's own error response.
 //!
 //! # Heap guard
 //!
@@ -90,7 +94,7 @@ use crate::status;
 const MIN_INTERNAL_FREE: usize = 64 * 1024;
 
 /// Every URI is registered for both methods `plan` distinguishes.
-const ROUTES: [(&str, HttpMethod); 10] = [
+const ROUTES: [(&str, HttpMethod); 17] = [
     ("/", HttpMethod::Get),
     ("/", HttpMethod::Head),
     ("/api/v1/status", HttpMethod::Get),
@@ -101,6 +105,13 @@ const ROUTES: [(&str, HttpMethod); 10] = [
     ("/api/v1/openapi.json", HttpMethod::Head),
     ("/api/v1/files/*", HttpMethod::Get),
     ("/api/v1/files/*", HttpMethod::Head),
+    ("/*", HttpMethod::Get),
+    ("/*", HttpMethod::Head),
+    ("/*", HttpMethod::Post),
+    ("/*", HttpMethod::Put),
+    ("/*", HttpMethod::Delete),
+    ("/*", HttpMethod::Patch),
+    ("/*", HttpMethod::Options),
 ];
 
 /// Everything the server needs to answer requests. Plain data: no handles and
@@ -157,7 +168,7 @@ pub struct Server {
 /// Start the server on `config.port`.
 ///
 /// Brings LwIP up (idempotent, so the boot path calling it first is fine),
-/// creates httpd, registers the ten method/path pairs, then checks that the
+/// creates httpd, registers the seventeen method/path pairs, then checks that the
 /// internal heap still has [`MIN_INTERNAL_FREE`] bytes. A server that started
 /// and then finds the budget gone is dropped before [`Error::Budget`] is
 /// returned.
@@ -286,14 +297,10 @@ fn write_body(
     body: &Body,
 ) -> Result<u64, sys::EspError> {
     match body {
-        Body::Bytes(bytes) => {
-            connection.write_all(bytes)?;
-            Ok(bytes.len() as u64)
-        }
-        Body::Json(text) => {
-            connection.write_all(text.as_bytes())?;
-            Ok(text.len() as u64)
-        }
+        Body::Bytes(bytes) => connection.write_all(bytes).map(|()| bytes.len() as u64),
+        Body::Json(text) => connection
+            .write_all(text.as_bytes())
+            .map(|()| text.len() as u64),
         Body::File { path, start, len } => stream_file(connection, source, path, *start, *len),
     }
 }

@@ -94,8 +94,9 @@
 //!
 //! [`ACCEPT_RANGES`] is the header every download carries. [`body_for`] applies
 //! the one method rule: a `HEAD` response carries the same head and **no**
-//! body, so the connection writes the head and zero body bytes, while a `GET`
-//! streams the body `download` selected.
+//! body, so the connection writes the head and zero body bytes, while a `GET`,
+//! `OPTIONS` or other method keeps the body - the fallback handler answers a
+//! method the API does not serve with a `405` JSON error body.
 //!
 //! ## The two sources
 //!
@@ -508,11 +509,11 @@ pub fn download(path: &str, total: u64, range: Result<RangeSpec, RangeError>) ->
     }
 }
 
-/// The body a response to `method` sends: `HEAD` has none.
+/// The body a response to `method` sends: only `HEAD` has none.
 pub fn body_for(method: Method, body: Body) -> Body {
     match method {
-        Method::Get => body,
-        Method::Head | Method::Options | Method::Other => Body::empty(),
+        Method::Head => Body::empty(),
+        Method::Get | Method::Options | Method::Other => body,
     }
 }
 
@@ -942,5 +943,14 @@ mod tests {
             Ok(data.len() as u64)
         );
         assert_eq!(get_out, data);
+    }
+
+    #[test]
+    fn non_head_methods_keep_the_error_body() {
+        let body = Body::Json("{\"error\":\"Method Not Allowed\"}".to_string());
+        assert_eq!(body_for(Method::Options, body.clone()), body);
+        assert_eq!(body_for(Method::Other, body.clone()), body);
+        assert_eq!(body_for(Method::Get, body.clone()), body);
+        assert_eq!(body_for(Method::Head, body), Body::empty());
     }
 }

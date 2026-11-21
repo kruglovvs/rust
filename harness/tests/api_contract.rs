@@ -151,11 +151,134 @@ fn parse_reply(raw: &[u8]) -> Result<Reply, String> {
             .ok_or_else(|| format!("header line without a colon: {line:?}"))?;
         headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
     }
+    let body = if header_is_chunked(&headers) {
+        decode_chunked(&raw[blank + 4..])?.ok_or_else(|| {
+            format!(
+                "truncated chunked body after {} body bytes",
+                raw.len() - blank - 4
+            )
+        })?
+    } else {
+        raw[blank + 4..].to_vec()
+    };
     Ok(Reply {
         status,
         headers,
-        body: raw[blank + 4..].to_vec(),
+        body,
     })
+}
+
+fn header_is_chunked(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+    })
+}
+
+/// Decode a complete chunked body. `Ok(None)` means the buffer ends before the
+/// zero-size chunk, so more bytes must be read.
+fn decode_chunked(body: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    loop {
+        let Some(line_end) = rest.windows(2).position(|window| window == b"\r\n") else {
+            return Ok(None);
+        };
+        let line = std::str::from_utf8(&rest[..line_end])
+            .map_err(|_| "chunk size line is not ASCII".to_string())?;
+        let size_text = line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_text, 16)
+            .map_err(|error| format!("chunk size {size_text:?}: {error}"))?;
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            loop {
+                let Some(end) = rest.windows(2).position(|window| window == b"\r\n") else {
+                    return Ok(None);
+                };
+                let empty = end == 0;
+                rest = &rest[end + 2..];
+                if empty {
+                    return Ok(Some(out));
+                }
+            }
+        }
+        if rest.len() < size + 2 {
+            return Ok(None);
+        }
+        if &rest[size..size + 2] != b"\r\n" {
+            return Err("chunk data is not CRLF-terminated".to_string());
+        }
+        out.extend_from_slice(&rest[..size]);
+        rest = &rest[size + 2..];
+    }
+}
+
+/// Whether `raw` holds a complete response head and body.
+fn reply_is_complete(raw: &[u8]) -> Result<bool, String> {
+    let Some(blank) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Ok(false);
+    };
+    let head = std::str::from_utf8(&raw[..blank]).map_err(|_| "head is not UTF-8")?;
+    let mut chunked = false;
+    let mut content_length = None;
+    for line in head.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+        {
+            chunked = true;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|error| format!("Content-Length {value:?}: {error}"))?,
+            );
+        }
+    }
+    let body = &raw[blank + 4..];
+    if chunked {
+        return Ok(decode_chunked(body)?.is_some());
+    }
+    Ok(content_length.is_some_and(|length| body.len() >= length))
+}
+
+/// Read until the response is complete. httpd keeps the connection alive, so
+/// EOF cannot be used as the end of a response.
+fn read_response(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return Ok(raw),
+            Ok(read) => {
+                raw.extend_from_slice(&buffer[..read]);
+                if reply_is_complete(&raw)? {
+                    return Ok(raw);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(format!(
+                    "timed out with {} bytes and no complete response",
+                    raw.len()
+                ))
+            }
+            Err(error) => return Err(format!("socket read failed: {error}")),
+        }
+    }
 }
 
 // ---- one case, one driver, one assertion set ------------------------------
@@ -270,20 +393,8 @@ fn assert_contract(driver: &mut dyn Driver, doc: &OpenAPI) -> (usize, usize) {
             reply.status, case.method, case.pattern
         );
 
-        let declared = reply
-            .header("content-length")
-            .unwrap_or_else(|| panic!("{label}: no Content-Length"));
-        let declared = declared
-            .parse::<u64>()
-            .unwrap_or_else(|_| panic!("{label}: Content-Length {declared:?} is not a number"));
         let is_json = reply.content_type().as_deref() == Some(JSON);
-        if case.method == "GET" || is_json {
-            assert_eq!(
-                declared,
-                reply.body.len() as u64,
-                "{label}: Content-Length must equal the body length"
-            );
-        }
+        let framing = framing_for(&label, &reply);
 
         if let Some(content_range) = reply.header("content-range") {
             check_content_range(&label, reply.status, content_range, reply.body.len());
@@ -305,7 +416,7 @@ fn assert_contract(driver: &mut dyn Driver, doc: &OpenAPI) -> (usize, usize) {
         }
 
         println!(
-            "{label} -> {} ({} bytes, Content-Length {declared}{})",
+            "{label} -> {} ({} bytes, {framing}{})",
             reply.status,
             reply.body.len(),
             if is_json && !reply.body.is_empty() {
@@ -318,6 +429,40 @@ fn assert_contract(driver: &mut dyn Driver, doc: &OpenAPI) -> (usize, usize) {
     }
     println!("contract[{name}]: {checked} responses checked, {json_validated} JSON bodies validated");
     (checked, json_validated)
+}
+
+/// Assert and describe the body framing: a `Content-Length` equal to the
+/// decoded body, or chunked transfer encoding. Every response carries one.
+fn framing_for(label: &str, reply: &Reply) -> String {
+    match reply.header("content-length") {
+        Some(declared) => {
+            assert!(
+                reply.header("transfer-encoding").is_none(),
+                "{label}: Content-Length and Transfer-Encoding are both present"
+            );
+            let declared = declared
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("{label}: Content-Length {declared:?} is not a number"));
+            assert_eq!(
+                declared,
+                reply.body.len() as u64,
+                "{label}: Content-Length must equal the decoded body length"
+            );
+            format!("Content-Length {declared}")
+        }
+        None => {
+            let encoding = reply
+                .header("transfer-encoding")
+                .unwrap_or_else(|| panic!("{label}: neither Content-Length nor Transfer-Encoding"));
+            assert!(
+                encoding
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("chunked")),
+                "{label}: expected chunked framing, got {encoding:?}"
+            );
+            "chunked".to_string()
+        }
+    }
 }
 
 fn body_preview(body: &[u8]) -> String {
@@ -717,9 +862,7 @@ impl LiveBoard {
         stream
             .write_all(request.as_bytes())
             .map_err(|error| format!("send {} {}: {error}", case.method, case.target))?;
-        let mut raw = Vec::new();
-        stream
-            .read_to_end(&mut raw)
+        let raw = read_response(&mut stream)
             .map_err(|error| format!("read {} {}: {error}", case.method, case.target))?;
         parse_reply(&raw)
     }
