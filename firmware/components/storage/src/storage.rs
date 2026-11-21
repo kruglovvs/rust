@@ -326,6 +326,18 @@ const PROBE_BAUD_HZ: u32 = 400_000;
 /// answering. Ten bytes = 80 clocks clears the requirement with margin.
 const BUS_IDLE_BYTES: usize = 10;
 
+/// Bounded `CMD0` (`GO_IDLE_STATE`) attempts used to enter SPI mode.
+///
+/// SD Physical Layer §7.2.1 lets the host repeat `CMD0` until the card answers
+/// R1 = `0x01`; cards that were last used in native SD mode, or whose power-up
+/// state machine is still settling, swallow the first frames. Eight attempts at
+/// ≤ 400 kHz cost well under a millisecond of bus time.
+const CMD0_ATTEMPTS: usize = 8;
+
+/// `0xFF` bytes clocked with CS **high** between `CMD0` attempts, so every
+/// retry reaches the card on a fresh chip-select assertion.
+const CMD0_CS_IDLE_BYTES: usize = 8;
+
 /// Clock ladder for plan (e): start at 40 MHz, then 20, then 10.
 pub const CLOCK_LADDER_KHZ: [u32; 3] = [40_000, 20_000, 10_000];
 
@@ -472,7 +484,7 @@ impl fmt::Display for CardProbe {
 // `storage::{...}` path keeps working.
 pub use crate::sd_probe::{
     aggregate_detected, classify_cmd8, encode_command, find_r1, is_all_ones,
-    legacy_identifies, CardClass, ProbeOutcome, R7,
+    legacy_identifies, r1_is_idle, CardClass, ProbeOutcome, R7,
 };
 
 // ---------------------------------------------------------------------------
@@ -790,8 +802,9 @@ impl<'d> Drop for RawSd<'d> {
 /// Sequence (plan (b)):
 /// 1. bus-idle read with CS **deasserted** — all-ones is the pull-up resting
 ///    level;
-/// 2. `CMD0` (`GO_IDLE_STATE`, R1 `0x95` CRC) — **issued but its R1 is never
-///    used to classify presence**;
+/// 2. `CMD0` (`GO_IDLE_STATE`, R1 `0x95` CRC) — repeated up to 8 times with
+///    CS cycled between attempts until the card answers R1 with the idle bit
+///    set; **its R1 is never used to classify presence**;
 /// 3. `CMD8` (`SEND_IF_COND`, R7, arg `0x1AA`, `0x87` CRC) — all-ones here is
 ///    the *not selected* verdict, otherwise `classify_cmd8`;
 /// 4. for a legacy card, `CMD55` + `ACMD41` then `CMD58`.
@@ -810,11 +823,53 @@ pub(crate) fn probe_pin<'d>(spi: &'d SpiDriver<'d>, cs: CsPin) -> Result<ProbeOu
         );
     }
 
-    // (2) CMD0 — reset to idle. Explicitly NOT a presence signal.
-    let cmd0 = raw.exchange(encode_command(0, 0x0000_0000, 0x95))?;
-    let cmd0_note = match RawSd::parse_r7(&cmd0) {
-        Some(r) => format!("R1={:#04x}", r.r1),
-        None => "no R1 within 32 clocks".to_string(),
+    // (2) CMD0 — reset to idle and enter SPI mode. Explicitly NOT a presence
+    // signal: a card still in native SD mode answers CMD0 on the CMD line, so
+    // an all-ones MISO window here means "not in SPI mode yet", not "no card".
+    // Repeated attempts with CS cycling are spec-sanctioned (§7.2.1) and some
+    // cards need them, so retry a bounded number of times and stop on the
+    // first R1 with the idle bit set.
+    let mut cmd0_attempts = 0usize;
+    let mut cmd0_last_r1: Option<u8> = None;
+    let mut cmd0_entered = false;
+    for attempt in 1..=CMD0_ATTEMPTS {
+        cmd0_attempts = attempt;
+
+        let mut flush = [0xFFu8; CMD0_CS_IDLE_BYTES];
+        raw.clock(&mut flush, false)?;
+
+        let window = raw.exchange(encode_command(0, 0x0000_0000, 0x95))?;
+        if let Some((_, r1)) = find_r1(&window[6..]) {
+            cmd0_last_r1 = Some(r1);
+            println!(
+                "storage: probe CS={} CMD0 attempt {}/{} -> R1={:#04x}",
+                cs.label(),
+                attempt,
+                CMD0_ATTEMPTS,
+                r1
+            );
+            if r1_is_idle(&window[6..]) {
+                cmd0_entered = true;
+                break;
+            }
+        }
+    }
+    if cmd0_last_r1.is_none() {
+        println!(
+            "storage: probe CS={} CMD0 -> no R1 in {}/{} attempts with CS cycling",
+            cs.label(),
+            cmd0_attempts,
+            CMD0_ATTEMPTS
+        );
+    }
+    let cmd0_note = match cmd0_last_r1 {
+        Some(r1) if cmd0_entered => format!(
+            "SPI mode after attempt {cmd0_attempts}/{CMD0_ATTEMPTS} (R1={r1:#04x})"
+        ),
+        Some(r1) => format!(
+            "R1={r1:#04x} without the idle bit in {cmd0_attempts}/{CMD0_ATTEMPTS} attempts"
+        ),
+        None => format!("no R1 in {cmd0_attempts}/{CMD0_ATTEMPTS} attempts"),
     };
 
     // (3) CMD8 — the command that actually responds. Classify HERE.
@@ -862,10 +917,11 @@ pub(crate) fn probe_pin<'d>(spi: &'d SpiDriver<'d>, cs: CsPin) -> Result<ProbeOu
                 (a, b) => {
                     println!(
                         "storage: probe CS={} -> unidentified (CMD8 R1/payload rejected; \
-                         ACMD41={:?} CMD58={:?})",
+                         ACMD41={:?} CMD58={:?}; CMD0 {})",
                         cs.label(),
                         a,
-                        b
+                        b,
+                        cmd0_note
                     );
                     Ok(ProbeOutcome::Unidentified)
                 }
@@ -1654,6 +1710,19 @@ mod tests {
     fn no_r1_when_the_card_never_answers() {
         // All-ones window: the card is not selected, so there is no R1.
         assert_eq!(find_r1(&[0xFFu8; 32]), None);
+    }
+
+    #[test]
+    fn cmd0_idle_r1_is_the_spi_mode_entry_signal() {
+        // NCR filler, then R1 = 0x01: the card accepted GO_IDLE_STATE.
+        assert!(r1_is_idle(&[0xFF, 0xFF, 0xFF, 0x01]));
+        assert!(r1_is_idle(&[0x01, 0xFF, 0xFF]));
+        // No answer at all: not selected, or not in SPI mode yet.
+        assert!(!r1_is_idle(&[0xFFu8; 32]));
+        // An R1 with error flags and no idle bit (0x08 = COM CRC ERROR) is an
+        // answer but not an accepted entry.
+        assert!(!r1_is_idle(&[0xFF, 0x08]));
+        assert!(!r1_is_idle(&[0xFF, 0x00]));
     }
 
     #[test]

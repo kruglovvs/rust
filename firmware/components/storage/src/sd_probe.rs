@@ -107,6 +107,22 @@ pub fn find_r1(window: &[u8]) -> Option<(usize, u8)> {
         .map(|(i, &b)| (i, b))
 }
 
+/// `true` when a command response window carries an R1 with the **idle** bit
+/// set — the answer `CMD0` (`GO_IDLE_STATE`) must produce before the card is
+/// in SPI mode.
+///
+/// SD Physical Layer §7.2.1: the host repeats `CMD0` until the card answers
+/// R1 = `0x01`. Some cards swallow the first frames while their power-up state
+/// machine settles, so a single unanswered `CMD0` proves nothing; the caller
+/// retries a bounded number of times and uses this predicate to stop on the
+/// first real idle answer.
+///
+/// `false` when no R1 appeared in the window (all-ones ⇒ not selected) or when
+/// the card answered with an error flag set (e.g. `0x08`, `COM CRC ERROR`).
+pub fn r1_is_idle(window: &[u8]) -> bool {
+    find_r1(window).is_some_and(|(_, r1)| r1 & 0x01 != 0)
+}
+
 /// Classify an `ACMD41`/`CMD58` exchange on a card that rejected `CMD8`.
 ///
 /// Returns `true` when the legacy identification sequence responded sanely.
