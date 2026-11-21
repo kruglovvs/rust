@@ -3,14 +3,14 @@
 //!
 //! One assertion set runs over two drivers:
 //!
-//! * [`InProcess`] builds the exact response bytes from the crate's pure
-//!   router, JSON, path, body and range modules (`#[path]` includes, no
-//!   socket), so it runs on a machine with no board.
+//! * [`InProcess`] calls the crate's pure `plan::plan` over a `MemorySource`
+//!   (`#[path]` includes, no socket), so it runs on a machine with no board.
 //! * [`LiveBoard`] sends the same requests over `std::net::TcpStream` to
 //!   `ESP32_BOARD_URL`, which is the only thing that proves the device answers.
 //!
-//! Both drivers end at [`parse_reply`], so a head-format difference between the
-//! in-process mirror and the device is a test failure rather than a blind spot.
+//! The live driver goes through [`parse_reply`]; the in-process driver turns
+//! the plan into the same [`Reply`] shape without a head, so both check the
+//! same status, headers and body rules.
 //!
 //! The set checks, per documented operation, that the response status is
 //! documented, that `Content-Length` equals the body length, that a
@@ -35,8 +35,8 @@
 //! decision both paths share, and [`live_gate_requires_the_board_url`] pins the
 //! message.
 
-#[path = "../../firmware/components/fileserver/src/http.rs"]
-mod http;
+#[path = "../../firmware/components/fileserver/src/plan.rs"]
+mod plan;
 
 #[path = "../../firmware/components/fileserver/src/router.rs"]
 mod router;
@@ -62,8 +62,6 @@ use openapiv3::{OpenAPI, Operation, ReferenceOr, Response, StatusCode};
 use serde_json::Value;
 
 use body::FileSource;
-use http::Status;
-use router::Route;
 
 /// The document the firmware embeds with `include_str!`; the in-process test
 /// asserts the served copy is byte-identical to this one.
@@ -505,15 +503,41 @@ fn validate_against(schema: &Value, instance: &Value) -> Result<(), String> {
 
 // ---- driver 1: the crate's pure code, no socket --------------------------
 
-struct InProcess;
+/// The recording fixture as a `MemorySource` table.
+static FILES: [(&str, &[u8]); 1] = [(RECORDING_NAME, &RECORDING)];
 
-/// What `response_for`/`serve_request` in `server.rs` produce, before bytes.
-struct Prepared {
-    status: Status,
-    content_length: u64,
-    content_range: Option<String>,
-    download: bool,
-    body: body::Body,
+/// The device data the in-process plan reads, filled with the values a
+/// card-less boot would gather.
+struct InProcessEnv {
+    source: body::MemorySource<'static>,
+}
+
+impl plan::Environment for InProcessEnv {
+    fn status(&self, out: &mut String) {
+        json::status_body(&snapshot(), out);
+    }
+
+    fn listing(&self, out: &mut String) {
+        json::list_body(LIST_DIR, &self.source, out, json::LIST_CAP);
+    }
+
+    fn len(&self, relative: &str) -> Result<u64, body::Error> {
+        self.source.len(relative)
+    }
+}
+
+struct InProcess {
+    env: InProcessEnv,
+}
+
+impl InProcess {
+    fn new() -> InProcess {
+        InProcess {
+            env: InProcessEnv {
+                source: body::MemorySource::new(&FILES),
+            },
+        }
+    }
 }
 
 fn snapshot() -> json::Snapshot<'static> {
@@ -551,96 +575,10 @@ fn in_process_cases() -> Vec<Case> {
     ]
 }
 
-fn prepare(method: http::Method, target: &str, range: Option<&str>) -> Result<Prepared, String> {
-    let route =
-        router::route(method, target).map_err(|status| format!("unrouted: {}", status.code()))?;
-    let files = [(RECORDING_NAME, &RECORDING[..])];
-    let source = body::MemorySource::new(&files);
-    Ok(match route {
-        Route::Index => {
-            let mut text = String::new();
-            json::index_body(&mut text);
-            json_text(text)
-        }
-        Route::Status => {
-            let mut text = String::new();
-            json::status_body(&snapshot(), &mut text);
-            json_text(text)
-        }
-        Route::Files => {
-            let mut text = String::new();
-            json::list_body(LIST_DIR, &source, &mut text, json::LIST_CAP);
-            json_text(text)
-        }
-        Route::OpenApi => {
-            let text = json::openapi_body();
-            Prepared {
-                status: Status::OK,
-                content_length: text.len() as u64,
-                content_range: None,
-                download: false,
-                body: body::Body::Bytes(text.as_bytes()),
-            }
-        }
-        Route::Download => {
-            let encoded = router::download_relative(route, target)
-                .ok_or_else(|| "download route without a relative path".to_string())?;
-            let mapped =
-                path::map(encoded, MOUNT_POINT).map_err(|error| format!("path rejected: {error:?}"))?;
-            let relative = mapped
-                .strip_prefix(MOUNT_POINT)
-                .and_then(|rest| rest.strip_prefix('/'))
-                .ok_or_else(|| format!("{mapped} is not below {MOUNT_POINT}"))?;
-            let total = source
-                .len(relative)
-                .map_err(|error| format!("length of {relative}: {error}"))?;
-            let selected = range::parse(range, total);
-            let download = body::download(relative, total, selected);
-            Prepared {
-                status: download.status,
-                content_length: download.content_length,
-                content_range: download.content_range,
-                download: true,
-                body: body::body_for(method, download.body),
-            }
-        }
-    })
-}
-
-fn json_text(text: String) -> Prepared {
-    Prepared {
-        status: Status::OK,
-        content_length: text.len() as u64,
-        content_range: None,
-        download: false,
-        body: body::Body::Json(text),
-    }
-}
-
-/// The download head from `server.rs`, which is hand-written there because
-/// `ResponseHead::extra` is `&'static` and `Content-Range` is not.
-fn download_head(status: Status, content_length: u64, content_range: Option<&str>) -> String {
-    use std::fmt::Write as _;
-
-    let mut head = String::with_capacity(192);
-    let _ = write!(
-        head,
-        "HTTP/1.1 {} {}\r\nContent-Type: {OCTET_STREAM}\r\nContent-Length: {content_length}\r\n\
-         Accept-Ranges: bytes\r\n",
-        status.code(),
-        status.reason()
-    );
-    if let Some(range) = content_range {
-        let _ = write!(head, "Content-Range: {range}\r\n");
-    }
-    head.push_str("Connection: close\r\n\r\n");
-    head
-}
-
-fn parse_method(method: &str) -> http::Method {
+fn parse_method(method: &str) -> plan::Method {
     match method {
-        "GET" => http::Method::Get,
-        "HEAD" => http::Method::Head,
+        "GET" => plan::Method::Get,
+        "HEAD" => plan::Method::Head,
         other => panic!("the contract test does not send {other}"),
     }
 }
@@ -655,34 +593,32 @@ impl Driver for InProcess {
     }
 
     fn request(&mut self, case: &Case) -> Result<Reply, String> {
-        let method = parse_method(case.method);
-        let prepared = prepare(method, &case.target, case.range.as_deref())?;
-        let files = [(RECORDING_NAME, &RECORDING[..])];
-        let source = body::MemorySource::new(&files);
-
-        let mut wire = Vec::new();
-        if prepared.download {
-            wire.extend_from_slice(
-                download_head(
-                    prepared.status,
-                    prepared.content_length,
-                    prepared.content_range.as_deref(),
-                )
-                .as_bytes(),
-            );
-        } else {
-            let head = http::ResponseHead::new(prepared.status, JSON, prepared.content_length);
-            let mut buffer = [0u8; 512];
-            let needed = http::head_len(&head);
-            let written = http::write_head(&mut buffer, &head);
-            if written != needed {
-                return Err("response head does not fit its buffer".to_string());
-            }
-            wire.extend_from_slice(&buffer[..written]);
-        }
-        body::write_body(&prepared.body, &source, &mut wire)
+        let view = plan::View {
+            mount_point: MOUNT_POINT,
+            env: &self.env,
+        };
+        let decision = plan::plan(
+            &view,
+            plan::Request {
+                method: parse_method(case.method),
+                uri_path: &case.target,
+                range: case.range.as_deref(),
+            },
+        );
+        let mut body_bytes = Vec::new();
+        body::write_body(&decision.body, &self.env.source, &mut body_bytes)
             .map_err(|error| format!("body: {error}"))?;
-        parse_reply(&wire)
+        let mut headers: Vec<(String, String)> = decision
+            .headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect();
+        headers.push(("content-length".to_string(), body_bytes.len().to_string()));
+        Ok(Reply {
+            status: decision.status.code(),
+            headers,
+            body: body_bytes,
+        })
     }
 }
 
@@ -862,7 +798,7 @@ fn in_process_driver_matches_the_shipped_document() {
         "router::ROUTES must not carry operations the document lacks: {documented:?}"
     );
 
-    let mut driver = InProcess;
+    let mut driver = InProcess::new();
     let (checked, validated) = assert_contract(&mut driver, &doc);
     assert_eq!(checked, in_process_cases().len());
     assert_eq!(validated, 4, "the four documented JSON routes");

@@ -106,7 +106,7 @@
 //! trait over a slice of `(path, bytes)` pairs, which is what lets the device
 //! test binary exercise listing and streaming without a card.
 
-use crate::http::{Method, Status};
+use crate::plan::{Method, Status};
 use crate::range::{RangeError, RangeSpec};
 use std::io::Write;
 
@@ -452,7 +452,10 @@ impl FileSource for MemorySource<'_> {
             };
             match child.split_once('/') {
                 Some((name, _)) => {
-                    if !entries.iter().any(|entry| entry.is_dir && entry.name == name) {
+                    if !entries
+                        .iter()
+                        .any(|entry| entry.is_dir && entry.name == name)
+                    {
                         entries.push(DirEntry {
                             name: name.to_string(),
                             is_dir: true,
@@ -866,7 +869,10 @@ mod tests {
         let response = download("rec/REC_0001.avi", 1000, range);
         assert_eq!(response.status, Status::PARTIAL_CONTENT);
         assert_eq!(response.content_length, 100);
-        assert_eq!(response.content_range.as_deref(), Some("bytes 100-199/1000"));
+        assert_eq!(
+            response.content_range.as_deref(),
+            Some("bytes 100-199/1000")
+        );
         assert_eq!(
             response.body,
             Body::File {
@@ -931,7 +937,10 @@ mod tests {
         // doing and not a broken source.
         let get = body_for(Method::Get, response.body);
         let mut get_out = Vec::new();
-        assert_eq!(write_body(&get, &source, &mut get_out), Ok(data.len() as u64));
+        assert_eq!(
+            write_body(&get, &source, &mut get_out),
+            Ok(data.len() as u64)
+        );
         assert_eq!(get_out, data);
     }
 }

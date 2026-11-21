@@ -236,7 +236,10 @@ mod tests {
     #[test]
     fn percent_decode_keeps_space_and_utf8() {
         assert_eq!(decode("rec/a%20b.avi").unwrap(), b"rec/a b.avi");
-        assert_eq!(decode("rec/%C3%A9.avi").unwrap(), "rec/\u{e9}.avi".as_bytes());
+        assert_eq!(
+            decode("rec/%C3%A9.avi").unwrap(),
+            "rec/\u{e9}.avi".as_bytes()
+        );
     }
 
     #[test]
@@ -263,7 +266,10 @@ mod tests {
     #[test]
     fn percent_decode_reports_a_small_buffer() {
         let mut out = [0u8; 2];
-        assert_eq!(percent_decode("abc", &mut out), Err(PathError::BufferTooSmall));
+        assert_eq!(
+            percent_decode("abc", &mut out),
+            Err(PathError::BufferTooSmall)
+        );
     }
 
     #[test]
@@ -302,7 +308,10 @@ mod tests {
             map("rec/REC%5F0001.avi", "/sdcard").unwrap(),
             "/sdcard/rec/REC_0001.avi"
         );
-        assert_eq!(map("rec/a%20b.avi", "/sdcard").unwrap(), "/sdcard/rec/a b.avi");
+        assert_eq!(
+            map("rec/a%20b.avi", "/sdcard").unwrap(),
+            "/sdcard/rec/a b.avi"
+        );
     }
 
     #[test]
@@ -403,7 +412,9 @@ mod tests {
 
     #[test]
     fn card_path_carries_the_relative_path() {
-        let card = CardPath { rel: "rec/REC_0001.avi" };
+        let card = CardPath {
+            rel: "rec/REC_0001.avi",
+        };
         assert_eq!(card.rel, "rec/REC_0001.avi");
     }
 }

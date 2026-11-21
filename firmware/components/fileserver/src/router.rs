@@ -22,10 +22,12 @@
 //! - `Ok(Route)` when the method/path pair matches an entry of [`ROUTES`].
 //!   Only `GET` and `HEAD` can match; `HEAD` matches the parameterised
 //!   download pattern and nothing else, because a `HEAD` of a JSON route has
-//!   no documented equivalent.
+//!   no entry in the shipped OpenAPI document. [`crate::plan`] still answers a
+//!   `HEAD` of those routes by selecting the `GET` entry, then dropping the
+//!   body.
 //! - `Err(Status::METHOD_NOT_ALLOWED)` for a method that is not `GET` or
-//!   `HEAD` (`POST`, `PUT`, `DELETE`, `OPTIONS`, and the parser's
-//!   [`Method::Other`], which includes a lowercase `get`). The method is
+//!   `HEAD` (`POST`, `PUT`, `DELETE`, `OPTIONS`, and [`Method::Other`], which
+//!   includes a lowercase `get`). The method is
 //!   checked first, so a rejected verb is a `405` for every path and cannot be
 //!   used to probe which paths exist.
 //! - `Err(Status::NOT_FOUND)` for a `GET`/`HEAD` path that matches no pattern.
@@ -38,7 +40,7 @@
 //! The JSON error body for a failure is [`crate::json::error_body`]; this
 //! module only names the status.
 
-use crate::http::{Method, Status};
+use crate::plan::{Method, Status};
 
 /// The operation a request selects. One variant per documented operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -98,9 +100,7 @@ pub fn route(method: Method, path: &str) -> Result<Route, Status> {
     }
     ROUTES
         .iter()
-        .find(|(declared, pattern)| {
-            method_matches(method, declared) && path_matches(pattern, path)
-        })
+        .find(|(declared, pattern)| method_matches(method, declared) && path_matches(pattern, path))
         .and_then(|(declared, pattern)| operation_for(pattern, declared))
         .ok_or(Status::NOT_FOUND)
 }
@@ -178,7 +178,10 @@ mod tests {
     #[test]
     fn route_status() {
         assert_eq!(route(Method::Get, "/api/v1/status"), Ok(Route::Status));
-        assert_eq!(route(Method::Get, "/api/v1/status").unwrap().name(), "Status");
+        assert_eq!(
+            route(Method::Get, "/api/v1/status").unwrap().name(),
+            "Status"
+        );
     }
 
     #[test]
@@ -263,11 +266,7 @@ mod tests {
 
     #[test]
     fn route_trailing_slash_is_404() {
-        for path in [
-            "/api/v1/status/",
-            "/api/v1/files/",
-            "/api/v1/openapi.json/",
-        ] {
+        for path in ["/api/v1/status/", "/api/v1/files/", "/api/v1/openapi.json/"] {
             assert_eq!(route(Method::Get, path), Err(Status::NOT_FOUND), "{path}");
         }
         // The same path without the trailing slash still routes, so the 404 is

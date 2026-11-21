@@ -62,7 +62,7 @@
 //! test validates. No HTML is ever produced by this module.
 
 use crate::body::{DirEntry, FileSource};
-use crate::http::Status;
+use crate::plan::Status;
 use crate::router::ROUTES;
 
 /// The RTSP path the media pipeline serves; the status document reports it.
@@ -243,7 +243,10 @@ mod tests {
     fn assert_schema_type(schema: &serde_json::Value, value: &serde_json::Value, name: &str) {
         let nullable = schema["nullable"].as_bool().unwrap_or(false);
         if value.is_null() {
-            assert!(nullable, "{name} is null but the document does not allow it");
+            assert!(
+                nullable,
+                "{name} is null but the document does not allow it"
+            );
             return;
         }
         match schema["type"].as_str() {
@@ -366,10 +369,7 @@ mod tests {
             ..fixture()
         };
         assert!(value_of(&empty)["recording_file"].is_null());
-        assert_eq!(
-            value_of(&fixture())["recording_file"],
-            "rec/REC_0002.avi"
-        );
+        assert_eq!(value_of(&fixture())["recording_file"], "rec/REC_0002.avi");
     }
 
     #[test]
@@ -404,7 +404,9 @@ mod tests {
             assert_eq!(entry["method"], *method);
             assert_eq!(entry["path"], *path);
             assert!(
-                entry["description"].as_str().is_some_and(|text| !text.is_empty()),
+                entry["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
                 "{method} {path} needs a description"
             );
             assert!(body.contains(&format!("\"{path}\"")), "{path} in {body}");
@@ -537,8 +539,9 @@ mod list {
     #[test]
     fn list_respects_cap() {
         assert_eq!(LIST_CAP, 200);
-        let names: Vec<std::string::String> =
-            (0..250).map(|index| format!("rec/REC_{index:04}.avi")).collect();
+        let names: Vec<std::string::String> = (0..250)
+            .map(|index| format!("rec/REC_{index:04}.avi"))
+            .collect();
         let data = [0u8; 8];
         let files: Vec<(&str, &[u8])> = names
             .iter()
@@ -547,7 +550,10 @@ mod list {
 
         let listed = paths(&body_of("rec", &files, LIST_CAP));
         assert_eq!(listed.len(), 200, "the documented ceiling is 200");
-        assert_eq!(listed.first().map(String::as_str), Some("/rec/REC_0000.avi"));
+        assert_eq!(
+            listed.first().map(String::as_str),
+            Some("/rec/REC_0000.avi")
+        );
         assert_eq!(listed.last().map(String::as_str), Some("/rec/REC_0199.avi"));
 
         assert_eq!(paths(&body_of("rec", &files, 5)).len(), 5, "cap lowers");

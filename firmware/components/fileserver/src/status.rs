@@ -259,7 +259,8 @@ fn with_sensor<T>(body: impl FnOnce(sys::temperature_sensor_handle_t) -> Option<
                 range_max: 80,
                 // The default clock source (`TEMPERATURE_SENSOR_CLK_SRC_DEFAULT`,
                 // i.e. RC_FAST) and the range are validated by the driver.
-                clk_src: sys::soc_periph_temperature_sensor_clk_src_t_TEMPERATURE_SENSOR_CLK_SRC_DEFAULT,
+                clk_src:
+                    sys::soc_periph_temperature_sensor_clk_src_t_TEMPERATURE_SENSOR_CLK_SRC_DEFAULT,
                 flags: sys::temperature_sensor_config_t__bindgen_ty_1 { allow_pd: 0 },
             };
             let mut handle: sys::temperature_sensor_handle_t = std::ptr::null_mut();

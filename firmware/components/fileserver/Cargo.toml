@@ -5,9 +5,9 @@ edition = "2021"
 rust-version = "1.85"
 
 [dependencies]
-# The server runs on the board's own std sockets: no async runtime, no HTTP
-# crate. `net` is needed because the device HIL tests bring the station up and
-# read its IPv4 address, `storage` for the `/sdcard` mount path.
+# The server runs on `esp-idf-svc`'s `EspHttpServer`; no async runtime and no
+# extra HTTP crate. `net` is needed because the boot path and the device HIL
+# tests bring the network stack up, `storage` for the `/sdcard` mount path.
 esp-idf-sys = "=0.38.1"
 esp-idf-hal = "=0.47.0"
 esp-idf-svc = "=0.53.0"
