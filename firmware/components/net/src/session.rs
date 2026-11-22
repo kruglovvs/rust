@@ -291,20 +291,14 @@ mod tests {
     fn no_client_suspends_capture_even_with_healthy_dma() {
         let s = Session::with_defaults();
         assert_eq!(s.state(), SessionState::Idle);
-        assert_eq!(
-            s.decide(1024 * KB, 256 * KB, 0),
-            CaptureDecision::Suspend
-        );
+        assert_eq!(s.decide(1024 * KB, 256 * KB, 0), CaptureDecision::Suspend);
     }
 
     #[test]
     fn slow_client_cooldown_slows_camera_then_recovers() {
         let mut s = Session::new(500);
         s.handle(Event::ClientConnected);
-        assert_eq!(
-            s.decide(64 * KB, 64 * KB, 1_000),
-            CaptureDecision::Capture
-        );
+        assert_eq!(s.decide(64 * KB, 64 * KB, 1_000), CaptureDecision::Capture);
         // Behaviour (c): a write stall arms the cooldown.
         s.note_write_stalled(1_000);
         assert_eq!(s.cooldown_until_ms(), 1_500);
@@ -313,16 +307,16 @@ mod tests {
             CaptureDecision::Backoff(BackoffReason::Cooldown { until_ms: 1_500 })
         );
         // Frame is dropped during the window (never queued), then capture resumes.
-        assert_eq!(
-            s.decide(64 * KB, 64 * KB, 1_500),
-            CaptureDecision::Capture
-        );
+        assert_eq!(s.decide(64 * KB, 64 * KB, 1_500), CaptureDecision::Capture);
     }
 
     #[test]
     fn disconnect_tears_down_from_the_callback() {
         let mut s = Session::with_defaults();
-        assert_eq!(s.handle(Event::ClientConnected), vec![SessionAction::StartCapture]);
+        assert_eq!(
+            s.handle(Event::ClientConnected),
+            vec![SessionAction::StartCapture]
+        );
         assert_eq!(s.state(), SessionState::Active);
         // Behaviour (d): the actions are returned *by handling the disconnect
         // event itself* — the caller applies TearDownServer inline.
@@ -332,12 +326,12 @@ mod tests {
         );
         assert_eq!(s.state(), SessionState::TornDown);
         // Capture is suspended after teardown.
-        assert_eq!(
-            s.decide(64 * KB, 64 * KB, 0),
-            CaptureDecision::Suspend
-        );
+        assert_eq!(s.decide(64 * KB, 64 * KB, 0), CaptureDecision::Suspend);
         // Duplicate disconnect is a no-op (no double teardown).
-        assert_eq!(s.handle(Event::ClientDisconnected), Vec::<SessionAction>::new());
+        assert_eq!(
+            s.handle(Event::ClientDisconnected),
+            Vec::<SessionAction>::new()
+        );
     }
 
     #[test]
@@ -366,7 +360,10 @@ mod tests {
         // double-start capture or corrupt state.
         let mut s = Session::with_defaults();
         s.handle(Event::ClientConnected);
-        assert_eq!(s.handle(Event::ClientConnected), Vec::<SessionAction>::new());
+        assert_eq!(
+            s.handle(Event::ClientConnected),
+            Vec::<SessionAction>::new()
+        );
         assert_eq!(s.state(), SessionState::Active);
     }
 

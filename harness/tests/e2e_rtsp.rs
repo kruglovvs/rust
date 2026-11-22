@@ -205,8 +205,7 @@ impl Conn {
                     }
                 } else if let Some(header_len) = find_subsequence(&self.buf, b"\r\n\r\n") {
                     let body_start = header_len + 4;
-                    let content_length =
-                        parse_content_length(&self.buf[..header_len]).unwrap_or(0);
+                    let content_length = parse_content_length(&self.buf[..header_len]).unwrap_or(0);
                     if self.buf.len() >= body_start + content_length {
                         let head = self.buf[..header_len].to_vec();
                         let body = self.buf[body_start..body_start + content_length].to_vec();
@@ -289,10 +288,9 @@ fn parse_response(head: &[u8], body: Vec<u8>) -> Result<Response, ClientError> {
             "expected an RTSP status line, got {status_line:?} (is this an RTSP server?)"
         )));
     }
-    let status: u16 = parts
-        .next()
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| ClientError::Protocol(format!("malformed RTSP status line: {status_line:?}")))?;
+    let status: u16 = parts.next().and_then(|s| s.parse().ok()).ok_or_else(|| {
+        ClientError::Protocol(format!("malformed RTSP status line: {status_line:?}"))
+    })?;
     let reason = parts.next().unwrap_or("").to_string();
 
     let mut headers = Vec::new();
@@ -790,8 +788,8 @@ fn live_rtsp_stream_meets_frame_and_av_thresholds() {
         }
     };
 
-    let stats = run_live(&url)
-        .unwrap_or_else(|e| panic!("live RTSP session against {url} failed: {e}"));
+    let stats =
+        run_live(&url).unwrap_or_else(|e| panic!("live RTSP session against {url} failed: {e}"));
 
     let av_delta = match (stats.video_start, stats.audio_start) {
         (Some(v), Some(a)) => {

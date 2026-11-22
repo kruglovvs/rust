@@ -57,6 +57,85 @@ pub enum RangeError {
     Unsatisfiable,
 }
 
+/// Map a `Range` header value and the representation length to the response
+/// arithmetic. See the [module contract](self) for the exact rule set.
+pub fn parse(header: Option<&str>, total: u64) -> Result<RangeSpec, RangeError> {
+    // An empty representation selects no byte, so no range applies; the
+    // header cannot make the answer anything but a zero-length 200.
+    if total == 0 {
+        return Ok(RangeSpec::Full);
+    }
+
+    let Some(header) = header else {
+        return Ok(RangeSpec::Full);
+    };
+
+    let Some((unit, spec)) = header.split_once('=') else {
+        return Ok(RangeSpec::Full);
+    };
+    if !unit.trim().eq_ignore_ascii_case("bytes") {
+        return Ok(RangeSpec::Full);
+    }
+
+    let spec = spec.trim();
+    // Multi-range (or a malformed set with empty elements): ignore, serve all.
+    if spec.contains(',') {
+        return Ok(RangeSpec::Full);
+    }
+
+    let Some((first, last)) = spec.split_once('-') else {
+        return Ok(RangeSpec::Full);
+    };
+    let (first, last) = (first.trim(), last.trim());
+
+    if first.is_empty() {
+        // Suffix range: the last `last` bytes.
+        let Some(suffix) = digits(last) else {
+            return Ok(RangeSpec::Full);
+        };
+        if suffix == 0 {
+            return Err(RangeError::Unsatisfiable);
+        }
+        return Ok(RangeSpec::Partial {
+            start: total.saturating_sub(suffix),
+            end: total - 1,
+        });
+    }
+
+    let Some(start) = digits(first) else {
+        return Ok(RangeSpec::Full);
+    };
+    let end = if last.is_empty() {
+        total - 1
+    } else {
+        let Some(end) = digits(last) else {
+            return Ok(RangeSpec::Full);
+        };
+        if start > end {
+            return Err(RangeError::Unsatisfiable);
+        }
+        end
+    };
+
+    if start >= total {
+        return Err(RangeError::Unsatisfiable);
+    }
+
+    Ok(RangeSpec::Partial {
+        start,
+        end: end.min(total - 1),
+    })
+}
+
+/// Parse an unsigned decimal number that consists only of ASCII digits, so a
+/// sign, whitespace, or an empty string is not a number. `None` on overflow.
+fn digits(text: &str) -> Option<u64> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<u64>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse, RangeError, RangeSpec};
@@ -274,83 +353,4 @@ mod tests {
             Ok(partial(10, u64::MAX - 1))
         );
     }
-}
-
-/// Map a `Range` header value and the representation length to the response
-/// arithmetic. See the [module contract](self) for the exact rule set.
-pub fn parse(header: Option<&str>, total: u64) -> Result<RangeSpec, RangeError> {
-    // An empty representation selects no byte, so no range applies; the
-    // header cannot make the answer anything but a zero-length 200.
-    if total == 0 {
-        return Ok(RangeSpec::Full);
-    }
-
-    let Some(header) = header else {
-        return Ok(RangeSpec::Full);
-    };
-
-    let Some((unit, spec)) = header.split_once('=') else {
-        return Ok(RangeSpec::Full);
-    };
-    if !unit.trim().eq_ignore_ascii_case("bytes") {
-        return Ok(RangeSpec::Full);
-    }
-
-    let spec = spec.trim();
-    // Multi-range (or a malformed set with empty elements): ignore, serve all.
-    if spec.contains(',') {
-        return Ok(RangeSpec::Full);
-    }
-
-    let Some((first, last)) = spec.split_once('-') else {
-        return Ok(RangeSpec::Full);
-    };
-    let (first, last) = (first.trim(), last.trim());
-
-    if first.is_empty() {
-        // Suffix range: the last `last` bytes.
-        let Some(suffix) = digits(last) else {
-            return Ok(RangeSpec::Full);
-        };
-        if suffix == 0 {
-            return Err(RangeError::Unsatisfiable);
-        }
-        return Ok(RangeSpec::Partial {
-            start: total.saturating_sub(suffix),
-            end: total - 1,
-        });
-    }
-
-    let Some(start) = digits(first) else {
-        return Ok(RangeSpec::Full);
-    };
-    let end = if last.is_empty() {
-        total - 1
-    } else {
-        let Some(end) = digits(last) else {
-            return Ok(RangeSpec::Full);
-        };
-        if start > end {
-            return Err(RangeError::Unsatisfiable);
-        }
-        end
-    };
-
-    if start >= total {
-        return Err(RangeError::Unsatisfiable);
-    }
-
-    Ok(RangeSpec::Partial {
-        start,
-        end: end.min(total - 1),
-    })
-}
-
-/// Parse an unsigned decimal number that consists only of ASCII digits, so a
-/// sign, whitespace, or an empty string is not a number. `None` on overflow.
-fn digits(text: &str) -> Option<u64> {
-    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    text.parse::<u64>().ok()
 }

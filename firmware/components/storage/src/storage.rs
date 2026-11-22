@@ -97,8 +97,8 @@ pub(crate) mod ffi {
 
     use esp_idf_hal::gpio::{AnyOutputPin, PinId};
     use esp_idf_sys::{
-        esp_err_t, esp_timer_get_time, esp_vfs_fat_info, gpio_config,
-        gpio_config_t, gpio_int_type_t_GPIO_INTR_DISABLE, gpio_mode_t_GPIO_MODE_OUTPUT,
+        esp_err_t, esp_timer_get_time, esp_vfs_fat_info, gpio_config, gpio_config_t,
+        gpio_int_type_t_GPIO_INTR_DISABLE, gpio_mode_t_GPIO_MODE_OUTPUT,
         gpio_pulldown_t_GPIO_PULLDOWN_DISABLE, gpio_pullup_t_GPIO_PULLUP_DISABLE, gpio_set_level,
         sdmmc_command_t, sdspi_dev_handle_t, sdspi_host_get_real_freq, sdspi_host_set_card_clk,
         EspError,
@@ -200,7 +200,6 @@ pub(crate) mod ffi {
             pull_up_en: gpio_pullup_t_GPIO_PULLUP_DISABLE,
             pull_down_en: gpio_pulldown_t_GPIO_PULLDOWN_DISABLE,
             intr_type: gpio_int_type_t_GPIO_INTR_DISABLE,
-            ..Default::default()
         };
         esp_idf_sys::esp!(unsafe { gpio_config(&cfg) })?;
         esp_idf_sys::esp!(unsafe { gpio_set_level(pin as _, 1) })?;
@@ -483,8 +482,8 @@ impl fmt::Display for CardProbe {
 // host harness can compile and test it. Re-exported here so every existing
 // `storage::{...}` path keeps working.
 pub use crate::sd_probe::{
-    aggregate_detected, classify_cmd8, encode_command, find_r1, is_all_ones,
-    legacy_identifies, r1_is_idle, CardClass, ProbeOutcome, R7,
+    aggregate_detected, classify_cmd8, encode_command, find_r1, is_all_ones, legacy_identifies,
+    r1_is_idle, CardClass, ProbeOutcome, R7,
 };
 
 // ---------------------------------------------------------------------------
@@ -811,7 +810,10 @@ impl<'d> Drop for RawSd<'d> {
 ///
 /// `pub(crate)` so the device HIL fixture (`hil_fixture::card`) can learn which
 /// pin the card answers on before it formats.
-pub(crate) fn probe_pin<'d>(spi: &'d SpiDriver<'d>, cs: CsPin) -> Result<ProbeOutcome, StorageError> {
+pub(crate) fn probe_pin<'d>(
+    spi: &'d SpiDriver<'d>,
+    cs: CsPin,
+) -> Result<ProbeOutcome, StorageError> {
     let mut raw = RawSd::new(spi, cs)?;
 
     // (1) Bus idle with CS deasserted: the card's MISO must be pulled high.
@@ -863,12 +865,12 @@ pub(crate) fn probe_pin<'d>(spi: &'d SpiDriver<'d>, cs: CsPin) -> Result<ProbeOu
         );
     }
     let cmd0_note = match cmd0_last_r1 {
-        Some(r1) if cmd0_entered => format!(
-            "SPI mode after attempt {cmd0_attempts}/{CMD0_ATTEMPTS} (R1={r1:#04x})"
-        ),
-        Some(r1) => format!(
-            "R1={r1:#04x} without the idle bit in {cmd0_attempts}/{CMD0_ATTEMPTS} attempts"
-        ),
+        Some(r1) if cmd0_entered => {
+            format!("SPI mode after attempt {cmd0_attempts}/{CMD0_ATTEMPTS} (R1={r1:#04x})")
+        }
+        Some(r1) => {
+            format!("R1={r1:#04x} without the idle bit in {cmd0_attempts}/{CMD0_ATTEMPTS} attempts")
+        }
         None => format!("no R1 in {cmd0_attempts}/{CMD0_ATTEMPTS} attempts"),
     };
 
@@ -1036,9 +1038,8 @@ impl<'d> Storage<'d> {
             (CsPin::Gpio21, ProbeOutcome::NotSelected),
             (CsPin::Gpio3, ProbeOutcome::NotSelected),
         ];
-        for slot in 0..CsPin::CANDIDATES.len() {
-            let cs = CsPin::CANDIDATES[slot];
-            outcomes[slot].1 = probe_pin(spi, cs)?;
+        for (outcome, cs) in outcomes.iter_mut().zip(CsPin::CANDIDATES) {
+            outcome.1 = probe_pin(spi, cs)?;
         }
 
         let probe = aggregate_probe(&outcomes);
@@ -1296,8 +1297,7 @@ impl<'d> Storage<'d> {
         }
 
         let (total_bytes, free_bytes) =
-            ffi::fat_info(core::ffi::CStr::from_bytes_with_nul(b"/sdcard\0").unwrap())
-                .map_err(|source| StorageError::FreeSpaceQuery { source })?;
+            ffi::fat_info(c"/sdcard").map_err(|source| StorageError::FreeSpaceQuery { source })?;
         println!(
             "storage: volume total={} B free={} B negotiated_clock={} kHz cs={}",
             total_bytes,
@@ -1355,10 +1355,8 @@ impl<'d> Storage<'d> {
 
     /// Free space in bytes, queried live (`getfree`).
     pub fn free_bytes_now(&self) -> Result<u64, StorageError> {
-        let (_total, free) = ffi::fat_info(
-            core::ffi::CStr::from_bytes_with_nul(b"/sdcard\0").expect("literal is NUL-terminated"),
-        )
-        .map_err(|source| StorageError::FreeSpaceQuery { source })?;
+        let (_total, free) =
+            ffi::fat_info(c"/sdcard").map_err(|source| StorageError::FreeSpaceQuery { source })?;
         Ok(free)
     }
 
@@ -1572,8 +1570,7 @@ fn run_acceptance_battery(_real_khz: u32) -> Result<Trial, StorageError> {
 
     // --- getfree before -----------------------------------------------------
     let (before, _total_before) =
-        ffi::fat_info(core::ffi::CStr::from_bytes_with_nul(b"/sdcard\0").expect("literal"))
-            .map_err(|source| StorageError::FreeSpaceQuery { source })?;
+        ffi::fat_info(c"/sdcard").map_err(|source| StorageError::FreeSpaceQuery { source })?;
 
     // --- timed 4 MiB sequential write --------------------------------------
     let (bytes_per_sec, write_res) = match write_repeated(&bulk, &pattern, THROUGHPUT_BYTES) {
@@ -1589,8 +1586,7 @@ fn run_acceptance_battery(_real_khz: u32) -> Result<Trial, StorageError> {
 
     // --- getfree after ------------------------------------------------------
     let (after, _total_after) =
-        ffi::fat_info(core::ffi::CStr::from_bytes_with_nul(b"/sdcard\0").expect("literal"))
-            .map_err(|source| StorageError::FreeSpaceQuery { source })?;
+        ffi::fat_info(c"/sdcard").map_err(|source| StorageError::FreeSpaceQuery { source })?;
     let delta = before.saturating_sub(after);
     println!(
         "storage: getfree before={} B after={} B delta={} B (expected >= {} B)",

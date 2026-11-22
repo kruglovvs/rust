@@ -79,8 +79,7 @@ fn patch_esp32_camera_eoi_scan(link_args: &[String]) {
     let Some(build_dir) = link_args.get(cwd_index + 1).map(PathBuf::from) else {
         return;
     };
-    let cam_hal = build_dir
-        .join("../managed_components/espressif__esp32-camera/driver/cam_hal.c");
+    let cam_hal = build_dir.join("../managed_components/espressif__esp32-camera/driver/cam_hal.c");
     let Ok(contents) = fs::read_to_string(&cam_hal) else {
         println!(
             "cargo:warning=firmware build.rs: could not read {}; skipping camera EOI patch",
@@ -135,8 +134,7 @@ fn patch_esp32_camera_soi_dump(link_args: &[String]) {
     let Some(build_dir) = link_args.get(cwd_index + 1).map(PathBuf::from) else {
         return;
     };
-    let cam_hal = build_dir
-        .join("../managed_components/espressif__esp32-camera/driver/cam_hal.c");
+    let cam_hal = build_dir.join("../managed_components/espressif__esp32-camera/driver/cam_hal.c");
     let Ok(contents) = fs::read_to_string(&cam_hal) else {
         println!(
             "cargo:warning=firmware build.rs: could not read {}; skipping camera SOI dump patch",
@@ -175,10 +173,14 @@ fn patch_esp32_camera_soi_dump(link_args: &[String]) {
         return;
     }
 
-    match run_component_ninja(link_args, &build_dir, "esp-idf/espressif__esp32-camera/libespressif__esp32-camera.a") {
-        Ok(status) if status.success() => println!(
-            "cargo:warning=firmware build.rs: patched esp32-camera SOI dump"
-        ),
+    match run_component_ninja(
+        link_args,
+        &build_dir,
+        "esp-idf/espressif__esp32-camera/libespressif__esp32-camera.a",
+    ) {
+        Ok(status) if status.success() => {
+            println!("cargo:warning=firmware build.rs: patched esp32-camera SOI dump")
+        }
         Ok(status) => println!(
             "cargo:warning=firmware build.rs: esp32-camera rebuild failed ({status}); \
              the SOI dump patch may not be linked"

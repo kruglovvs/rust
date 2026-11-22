@@ -40,13 +40,34 @@ fn artifacts(name: &str) -> PathBuf {
 fn build_clip(name: &str, audio: &str, seconds: &str) -> PathBuf {
     let dir = artifacts(name);
 
-    run(Command::new("ffmpeg").args([
-        "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10",
-        "-f", "lavfi", "-i", audio,
-        "-t", seconds, "-c:v", "mjpeg", "-q:v", "5",
-        "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1", "-y",
-    ]).arg(dir.join("stream.mkv")));
+    run(Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            audio,
+            "-t",
+            seconds,
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "5",
+            "-c:a",
+            "pcm_mulaw",
+            "-ar",
+            "8000",
+            "-ac",
+            "1",
+            "-y",
+        ])
+        .arg(dir.join("stream.mkv")));
 
     for (map, file, format) in [
         ("0:v:0", "video.mjpeg", "mjpeg"),
@@ -85,7 +106,12 @@ fn analyzer_passes_a_known_good_recording() {
     }
     let dir = build_clip("analyzer-good", "sine=frequency=440:sample_rate=8000", "60");
     let outcome = analyze(&dir);
-    assert_eq!(outcome.verdict, Verdict::Pass, "failed: {:?}", outcome.failed);
+    assert_eq!(
+        outcome.verdict,
+        Verdict::Pass,
+        "failed: {:?}",
+        outcome.failed
+    );
 
     let metrics = std::fs::read_to_string(dir.join("metrics.json")).expect("metrics.json");
     assert!(metrics.contains("\"codec\": \"mjpeg\""));
@@ -105,7 +131,10 @@ fn analyzer_rejects_silent_audio() {
     let outcome = analyze(&dir);
     assert_eq!(outcome.verdict, Verdict::Fail);
     assert!(
-        outcome.failed.iter().any(|check| check.starts_with("audio not silent")),
+        outcome
+            .failed
+            .iter()
+            .any(|check| check.starts_with("audio not silent")),
         "expected the silence check to fail, got {:?}",
         outcome.failed
     );
@@ -163,7 +192,7 @@ fn audio_stats_separate_noise_from_signal() {
         level
             .split(&format!("\"{name}\": "))
             .nth(1)
-            .and_then(|rest| rest.split(|c| c == ',' || c == '}').next())
+            .and_then(|rest| rest.split([',', '}']).next())
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or_else(|| panic!("missing {name} in {level}"))
     };
@@ -177,12 +206,29 @@ fn audio_stats_separate_noise_from_signal() {
 
     // 50% duty cycle between 0.25 and 0.002 full scale: the overall RMS lands
     // between the two block levels.
-    assert!((-50.0..=-10.0).contains(&rms), "rms {rms} should be a mid-level tone");
+    assert!(
+        (-50.0..=-10.0).contains(&rms),
+        "rms {rms} should be a mid-level tone"
+    );
     assert!(peak > rms, "peak {peak} must exceed rms {rms}");
     assert!(crest > 0.0, "crest {crest} must be positive");
     // 0.25 to 0.002 full scale is about 42 dB, so the two levels must separate.
-    assert!(snr > 20.0, "loud and quiet halves should separate, got {snr} dB SNR");
-    assert!(noise < rms, "noise floor {noise} must sit below the signal {rms}");
-    assert!(clipping < 0.001, "a -12 dBFS tone must not clip, got {clipping}");
-    assert_eq!(outcome.verdict, Verdict::Pass, "failed: {:?}", outcome.failed);
+    assert!(
+        snr > 20.0,
+        "loud and quiet halves should separate, got {snr} dB SNR"
+    );
+    assert!(
+        noise < rms,
+        "noise floor {noise} must sit below the signal {rms}"
+    );
+    assert!(
+        clipping < 0.001,
+        "a -12 dBFS tone must not clip, got {clipping}"
+    );
+    assert_eq!(
+        outcome.verdict,
+        Verdict::Pass,
+        "failed: {:?}",
+        outcome.failed
+    );
 }

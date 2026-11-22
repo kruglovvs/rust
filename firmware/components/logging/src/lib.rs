@@ -15,8 +15,8 @@ pub fn print(arguments: std::fmt::Arguments<'_>) {
     unsafe {
         esp_idf_sys::esp_log_write(
             esp_idf_sys::esp_log_level_t_ESP_LOG_INFO,
-            b"app\0".as_ptr() as *const core::ffi::c_char,
-            b"%s\0".as_ptr() as *const core::ffi::c_char,
+            c"app".as_ptr(),
+            c"%s".as_ptr(),
             message.as_ptr(),
         );
     }

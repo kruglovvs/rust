@@ -140,6 +140,9 @@ impl NetConfig {
 
 /// Typed errors for network bring-up (house style: Display + Error, no
 /// string-matching at call sites).
+// The device bring-up path constructs the later variants; the host harness
+// compiles only this pure layer, so they read as unconstructed there.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetError {
     SsidInvalid { len: usize },
@@ -163,7 +166,10 @@ impl std::fmt::Display for NetError {
         match self {
             Self::SsidInvalid { len } => write!(f, "SSID length {len} outside 1..=32 bytes"),
             Self::PasswordInvalid { len } => {
-                write!(f, "password length {len} is neither a 8..=63 passphrase nor a 64-hex PSK")
+                write!(
+                    f,
+                    "password length {len} is neither a 8..=63 passphrase nor a 64-hex PSK"
+                )
             }
             Self::HostnameInvalid => write!(f, "hostname empty or longer than 63 bytes"),
             Self::ConfigInvalid(what) => write!(f, "invalid network config: {what}"),
@@ -320,6 +326,12 @@ impl SntpClock {
     }
 }
 
+impl Default for SntpClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Module-level clock; `is_synced()` / `last_sync_utc()` read it without
 /// needing the `EspSntp` handle.
 static SNTP_CLOCK: Mutex<SntpClock> = Mutex::new(SntpClock::new());
@@ -396,10 +408,9 @@ mod esp_impl {
     /// `camera.rs` / `storage.rs`).
     mod ffi {
         use esp_idf_svc::sys::{
-            esp_log_level_t_ESP_LOG_INFO as ESP_LOG_INFO,
-            esp_log_write, esp_netif_init, esp_timer_get_time, esp_wifi_set_ps,
-            heap_caps_get_free_size, heap_caps_get_largest_free_block,
-            wifi_ps_type_t_WIFI_PS_NONE, EspError,
+            esp_log_level_t_ESP_LOG_INFO as ESP_LOG_INFO, esp_log_write, esp_netif_init,
+            esp_timer_get_time, esp_wifi_set_ps, heap_caps_get_free_size,
+            heap_caps_get_largest_free_block, wifi_ps_type_t_WIFI_PS_NONE, EspError,
         };
         use std::ffi::CString;
 
@@ -445,12 +456,7 @@ mod esp_impl {
             let tag = CString::new(tag).unwrap_or_default();
             let msg = CString::new(msg).unwrap_or_default();
             unsafe {
-                esp_log_write(
-                    level,
-                    tag.as_ptr(),
-                    b"%s\0".as_ptr() as *const _,
-                    msg.as_ptr(),
-                );
+                esp_log_write(level, tag.as_ptr(), c"%s".as_ptr(), msg.as_ptr());
             }
         }
     }
@@ -484,9 +490,8 @@ mod esp_impl {
         // `info` is exclusively borrowed for the duration of the call.
         unsafe {
             let ifkey = b"WIFI_STA_DEF\0";
-            let handle = esp_idf_svc::sys::esp_netif_get_handle_from_ifkey(
-                ifkey.as_ptr() as *const _,
-            );
+            let handle =
+                esp_idf_svc::sys::esp_netif_get_handle_from_ifkey(ifkey.as_ptr() as *const _);
             if handle.is_null() {
                 return None;
             }
@@ -512,8 +517,7 @@ mod esp_impl {
         // afterwards is a bug)" — pin TZ so every later conversion is UTC.
         std::env::set_var("TZ", "UTC0");
 
-        let sys_loop =
-            EspSystemEventLoop::take().map_err(|_| NetError::EventLoopTaken)?;
+        let sys_loop = EspSystemEventLoop::take().map_err(|_| NetError::EventLoopTaken)?;
         let nvs = EspDefaultNvsPartition::take().map_err(|_| NetError::NvsTaken)?;
 
         let esp_wifi =
@@ -529,13 +533,11 @@ mod esp_impl {
                 .map_err(|_| NetError::SsidInvalid {
                     len: credentials.ssid.len(),
                 })?,
-            password: credentials
-                .password
-                .as_str()
-                .try_into()
-                .map_err(|_| NetError::PasswordInvalid {
+            password: credentials.password.as_str().try_into().map_err(|_| {
+                NetError::PasswordInvalid {
                     len: credentials.password.len(),
-                })?,
+                }
+            })?,
             ..Default::default()
         };
         wifi.set_configuration(&Configuration::Client(client))
@@ -552,10 +554,7 @@ mod esp_impl {
         // Plan behaviour (a) — FIRST thing after the driver is up, before any
         // streaming: without this, "RTSP streaming may hit TX backpressure".
         ffi::wifi_disable_power_save().map_err(|e| {
-            ffi::log_info(
-                "net",
-                &format!("esp_wifi_set_ps(WIFI_PS_NONE) failed: {e}"),
-            );
+            ffi::log_info("net", &format!("esp_wifi_set_ps(WIFI_PS_NONE) failed: {e}"));
             NetError::WifiStart
         })?;
         ffi::log_info(
@@ -659,10 +658,7 @@ mod esp_impl {
         }
     }
 
-    fn supervisor_loop(
-        mut wifi: BlockingWifi<EspWifi<'static>>,
-        mut was_connected: bool,
-    ) {
+    fn supervisor_loop(mut wifi: BlockingWifi<EspWifi<'static>>, mut was_connected: bool) {
         let mut attempt: u32 = 0;
         let mut next_retry_ms: u64 = 0;
         let mut last_decision: Option<session::CaptureDecision> = None;
@@ -703,17 +699,14 @@ mod esp_impl {
                 let backoff = retry_backoff_ms(attempt);
                 ffi::log_info(
                     "net",
-                    &format!(
-                        "Wi-Fi reconnect attempt {attempt} (next backoff {backoff} ms)"
-                    ),
+                    &format!("Wi-Fi reconnect attempt {attempt} (next backoff {backoff} ms)"),
                 );
                 match wifi.connect() {
                     Ok(()) => match wifi.wait_netif_up() {
                         Ok(()) => {}
-                        Err(e) => ffi::log_info(
-                            "net",
-                            &format!("reconnect: netif up wait failed: {e}"),
-                        ),
+                        Err(e) => {
+                            ffi::log_info("net", &format!("reconnect: netif up wait failed: {e}"))
+                        }
                     },
                     Err(e) => ffi::log_info("net", &format!("reconnect attempt failed: {e}")),
                 }
@@ -842,7 +835,10 @@ mod tests {
 
         clock.set_started(1_000);
         // Before the timeout: no failure line yet.
-        assert_eq!(clock.take_failure_report(1_000 + FAILURE_LOG_AFTER_MS - 1), None);
+        assert_eq!(
+            clock.take_failure_report(1_000 + FAILURE_LOG_AFTER_MS - 1),
+            None
+        );
         assert_eq!(
             clock.take_failure_report(1_000 + FAILURE_LOG_AFTER_MS),
             Some(SntpFailureReason::NoResponseWithinTimeout)

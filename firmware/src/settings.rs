@@ -62,7 +62,11 @@ pub const fn parse_u32(value: Option<&str>, default: u32) -> u32 {
         };
         index += 1;
     }
-    if parsed == 0 { default } else { parsed }
+    if parsed == 0 {
+        default
+    } else {
+        parsed
+    }
 }
 
 /// Which consumers the boot pipeline attaches to the capture service.

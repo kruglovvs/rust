@@ -32,7 +32,9 @@ fn main() {
             "--width" => options.width = value.parse().unwrap_or(options.width),
             "--height" => options.height = value.parse().unwrap_or(options.height),
             "--min-frames" => options.min_frames = value.parse().unwrap_or(options.min_frames),
-            "--min-duration" => options.min_duration = value.parse().unwrap_or(options.min_duration),
+            "--min-duration" => {
+                options.min_duration = value.parse().unwrap_or(options.min_duration)
+            }
             "--audio-codec" => options.audio_codec = value,
             "--audio-rate" => options.audio_rate = value.parse().unwrap_or(options.audio_rate),
             other => {

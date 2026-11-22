@@ -57,13 +57,27 @@ fn live_stream_matches_the_configured_geometry() {
     };
 
     let record = Command::new("ffmpeg")
-        .args(["-hide_banner", "-nostdin", "-rtsp_transport", "tcp", "-i", &url,
-               "-t", "10", "-c", "copy", "-y"])
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-rtsp_transport",
+            "tcp",
+            "-i",
+            &url,
+            "-t",
+            "10",
+            "-c",
+            "copy",
+            "-y",
+        ])
         .arg(out.join("stream.mkv"))
         .output()
         .expect("run ffmpeg");
-    assert!(record.status.success(), "capture failed: {}",
-        String::from_utf8_lossy(&record.stderr));
+    assert!(
+        record.status.success(),
+        "capture failed: {}",
+        String::from_utf8_lossy(&record.stderr)
+    );
 
     for (map, file, format) in [
         ("0:v:0", "video.mjpeg", "mjpeg"),
@@ -98,8 +112,17 @@ fn live_stream_matches_the_configured_geometry() {
     let metrics = std::fs::read_to_string(out.join("metrics.json"))
         .expect("analyser must produce metrics.json");
     assert!(metrics.contains("\"codec\": \"mjpeg\""), "video codec");
-    assert!(metrics.contains(&format!("\"codec\": \"{audio_codec}\"")), "audio codec");
-    assert!(metrics.contains(&format!("\"width\": {width}")), "video width should be {width}");
-    assert!(metrics.contains(&format!("\"height\": {height}")), "video height should be {height}");
+    assert!(
+        metrics.contains(&format!("\"codec\": \"{audio_codec}\"")),
+        "audio codec"
+    );
+    assert!(
+        metrics.contains(&format!("\"width\": {width}")),
+        "video width should be {width}"
+    );
+    assert!(
+        metrics.contains(&format!("\"height\": {height}")),
+        "video height should be {height}"
+    );
     assert!(metrics.contains("\"frames\": "), "frame count missing");
 }

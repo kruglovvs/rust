@@ -121,8 +121,14 @@ impl Reply {
 
     /// The media type without parameters, lower case.
     fn content_type(&self) -> Option<String> {
-        self.header("content-type")
-            .map(|value| value.split(';').next().unwrap_or(value).trim().to_ascii_lowercase())
+        self.header("content-type").map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .to_ascii_lowercase()
+        })
     }
 }
 
@@ -372,7 +378,8 @@ fn assert_contract(driver: &mut dyn Driver, doc: &OpenAPI) -> (usize, usize) {
             .request(case)
             .unwrap_or_else(|error| panic!("{label}: {error}"));
         assert_eq!(
-            reply.status, case.expected,
+            reply.status,
+            case.expected,
             "{label}: expected {}, got {} (body: {})",
             case.expected,
             reply.status,
@@ -410,8 +417,9 @@ fn assert_contract(driver: &mut dyn Driver, doc: &OpenAPI) -> (usize, usize) {
                 });
             let instance: Value = serde_json::from_slice(&reply.body)
                 .unwrap_or_else(|error| panic!("{label}: body is not JSON: {error}"));
-            validate_against(&schema, &instance)
-                .unwrap_or_else(|error| panic!("{label}: body does not match the document: {error}"));
+            validate_against(&schema, &instance).unwrap_or_else(|error| {
+                panic!("{label}: body does not match the document: {error}")
+            });
             json_validated += 1;
         }
 
@@ -427,7 +435,9 @@ fn assert_contract(driver: &mut dyn Driver, doc: &OpenAPI) -> (usize, usize) {
         );
         checked += 1;
     }
-    println!("contract[{name}]: {checked} responses checked, {json_validated} JSON bodies validated");
+    println!(
+        "contract[{name}]: {checked} responses checked, {json_validated} JSON bodies validated"
+    );
     (checked, json_validated)
 }
 
@@ -497,8 +507,14 @@ fn check_content_range(label: &str, status: u16, header: &str, body_len: usize) 
     let end: u64 = end
         .parse()
         .unwrap_or_else(|_| panic!("{label}: Content-Range end {end:?} is not a number"));
-    assert!(end >= start, "{label}: Content-Range end {end} < start {start}");
-    assert!(end < total, "{label}: Content-Range end {end} is not below total {total}");
+    assert!(
+        end >= start,
+        "{label}: Content-Range end {end} < start {start}"
+    );
+    assert!(
+        end < total,
+        "{label}: Content-Range end {end} is not below total {total}"
+    );
     assert_eq!(
         body_len as u64,
         end - start + 1,
@@ -548,7 +564,10 @@ fn json_schema_for(
     status: u16,
 ) -> Option<Value> {
     let operation = operation_for(doc, pattern, method)?;
-    let response = operation.responses.responses.get(&StatusCode::Code(status))?;
+    let response = operation
+        .responses
+        .responses
+        .get(&StatusCode::Code(status))?;
     let response = resolve_response(doc, response)?;
     let schema = response.content.get(JSON)?.schema.as_ref()?;
     let schema = match schema {
@@ -612,7 +631,10 @@ fn normalise_nullable(value: Value) -> Value {
                         let name = std::mem::take(name);
                         map.insert(
                             "type".to_string(),
-                            Value::Array(vec![Value::String(name), Value::String("null".to_string())]),
+                            Value::Array(vec![
+                                Value::String(name),
+                                Value::String("null".to_string()),
+                            ]),
                         );
                     }
                     Some(Value::Array(names)) => names.push(Value::String("null".to_string())),
@@ -635,7 +657,11 @@ fn validate_against(schema: &Value, instance: &Value) -> Result<(), String> {
         .iter_errors(instance)
         .map(|error| {
             let pointer = error.instance_path().as_str().to_string();
-            let pointer = if pointer.is_empty() { "/".to_string() } else { pointer };
+            let pointer = if pointer.is_empty() {
+                "/".to_string()
+            } else {
+                pointer
+            };
             format!("{pointer}: {error}")
         })
         .collect();
@@ -947,9 +973,15 @@ fn in_process_driver_matches_the_shipped_document() {
     assert_eq!(validated, 4, "the four documented JSON routes");
 
     let partial = driver
-        .request(&Case::get("/api/v1/files/{path}", RECORDING_TARGET, 206).ranged("bytes=1024-2047"))
+        .request(
+            &Case::get("/api/v1/files/{path}", RECORDING_TARGET, 206).ranged("bytes=1024-2047"),
+        )
         .expect("the in-process driver serves the 206");
-    assert_eq!(partial.body, RECORDING[1024..2048], "the 206 body is the requested window");
+    assert_eq!(
+        partial.body,
+        RECORDING[1024..2048],
+        "the 206 body is the requested window"
+    );
 }
 
 #[test]

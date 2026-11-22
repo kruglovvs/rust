@@ -170,9 +170,8 @@ fn publish() {
 
 /// Format FAT32, then mount. Runs on the dedicated bring-up thread.
 fn initialise() -> Result<(&'static Storage<'static>, &'static SpiDriver<'static>), String> {
-    let Peripherals {
-        pins, spi2, ..
-    } = Peripherals::take().map_err(|error| format!("peripherals already taken: {error}"))?;
+    let Peripherals { pins, spi2, .. } =
+        Peripherals::take().map_err(|error| format!("peripherals already taken: {error}"))?;
 
     let spi: SpiDriver<'static> = storage::new_bus(spi2, pins.gpio7, pins.gpio9, pins.gpio8)
         .map_err(|error| format!("SPI2 bus init failed: {error}"))?;
@@ -358,7 +357,9 @@ impl Heartbeat {
                     }
                 }
             })
-            .expect("fixture: cannot spawn the heartbeat thread (idle watchdog would kill the run)");
+            .expect(
+                "fixture: cannot spawn the heartbeat thread (idle watchdog would kill the run)",
+            );
         Self {
             stop,
             thread: Some(thread),
@@ -549,7 +550,10 @@ mod tests {
             "card() must return the same leaked Storage on every call"
         );
         assert_eq!(first.base_path(), BASE_PATH);
-        assert!(first.total_bytes() > 0, "the mounted volume reports no capacity");
+        assert!(
+            first.total_bytes() > 0,
+            "the mounted volume reports no capacity"
+        );
         assert!(
             first.negotiated_khz() >= CLOCK_LADDER_KHZ[CLOCK_LADDER_KHZ.len() - 1],
             "negotiated clock {} kHz is below the ladder floor",
@@ -590,8 +594,6 @@ mod tests {
             ),
             "second bringup returned an unexpected error variant: {error:?}"
         );
-        logging::log!(
-            "fixture: HEARTBEAT second-bringup-rejected after {elapsed:?}: {error}"
-        );
+        logging::log!("fixture: HEARTBEAT second-bringup-rejected after {elapsed:?}: {error}");
     }
 }

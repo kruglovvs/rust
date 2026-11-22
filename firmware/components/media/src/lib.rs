@@ -132,8 +132,13 @@ impl Config<'_> {
         if self.jpeg_quality > 63 {
             return Err(Error::InvalidConfig("jpeg_quality must be in 0..=63"));
         }
-        if !matches!(self.audio_sample_rate, 0 | 8_000 | 16_000 | 22_050 | 24_000 | 32_000 | 44_100 | 48_000) {
-            return Err(Error::InvalidConfig("audio_sample_rate must be a standard rate"));
+        if !matches!(
+            self.audio_sample_rate,
+            0 | 8_000 | 16_000 | 22_050 | 24_000 | 32_000 | 44_100 | 48_000
+        ) {
+            return Err(Error::InvalidConfig(
+                "audio_sample_rate must be a standard rate",
+            ));
         }
         Ok(())
     }
@@ -243,7 +248,10 @@ impl fmt::Display for Error {
                 write!(f, "media pipeline: step `{step}` returned a null handle")
             }
             Error::Config { step } => {
-                write!(f, "media pipeline: step `{step}` received an invalid configuration string")
+                write!(
+                    f,
+                    "media pipeline: step `{step}` received an invalid configuration string"
+                )
             }
             Error::InvalidConfig(reason) => {
                 write!(f, "media pipeline: invalid configuration: {reason}")
@@ -282,7 +290,7 @@ fn video_track_info(cfg: &Config<'_>) -> gmf::esp_media_track_info_t {
         type_: gmf::esp_media_track_type_t_ESP_MEDIA_TRACK_TYPE_VIDEO,
         info: gmf::esp_media_track_info_t__bindgen_ty_1 {
             video: gmf::esp_media_video_info_t {
-                codec: gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_MJPEG as u32,
+                codec: gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_MJPEG,
                 width: cfg.width as u16,
                 height: cfg.height as u16,
                 fps: cfg.fps as u16,
@@ -309,7 +317,7 @@ fn audio_track_info(cfg: &Config<'_>) -> gmf::esp_media_track_info_t {
         type_: gmf::esp_media_track_type_t_ESP_MEDIA_TRACK_TYPE_AUDIO,
         info: gmf::esp_media_track_info_t__bindgen_ty_1 {
             audio: gmf::esp_media_audio_info_t {
-                codec: gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_AAC as u32,
+                codec: gmf::esp_capture_format_id_t_ESP_CAPTURE_FMT_ID_AAC,
                 sample_rate,
                 bits_per_sample: 16,
                 channel: 1,
@@ -624,6 +632,9 @@ mod ffi {
         Ok(bus)
     }
 
+    // The esp-idf-sys config structs carry a bindgen union and, for the flags,
+    // need a method call after construction, so a struct literal is not viable.
+    #[allow(clippy::field_reassign_with_default)]
     pub(crate) fn i2c_config() -> sys::i2c_master_bus_config_t {
         let mut config = sys::i2c_master_bus_config_t::default();
         config.i2c_port = 0;
@@ -632,12 +643,14 @@ mod ffi {
         config.glitch_ignore_cnt = 7;
         config.intr_priority = 0;
         config.trans_queue_depth = 0;
-        config.__bindgen_anon_1.clk_source =
-            sys::soc_periph_i2c_clk_src_t_I2C_CLK_SRC_DEFAULT;
+        config.__bindgen_anon_1.clk_source = sys::soc_periph_i2c_clk_src_t_I2C_CLK_SRC_DEFAULT;
         config.flags.set_enable_internal_pullup(1);
         config
     }
 
+    // As in `i2c_config`: the bindgen structs default-plus-assign cleanly and
+    // a literal cannot express the anonymous-union fields.
+    #[allow(clippy::field_reassign_with_default)]
     pub(crate) fn pdm_config() -> sys::i2s_pdm_rx_config_t {
         let mut clk = sys::i2s_pdm_rx_clk_config_t::default();
         clk.sample_rate_hz = 16_000;
@@ -667,6 +680,9 @@ mod ffi {
     /// Allocate the PDM RX channel on `I2S_NUM_0` and initialize PDM RX mode.
     ///
     /// The channel is left in the READY state; `esp_codec_dev_open` enables it.
+    // As in `i2c_config`: several anonymous-union fields are set, so the
+    // suggested struct literal would be less readable than default-plus-assign.
+    #[allow(clippy::field_reassign_with_default)]
     pub fn pdm_rx_channel() -> Result<sys::i2s_chan_handle_t, Error> {
         let mut chan_cfg = sys::i2s_chan_config_t::default();
         chan_cfg.id = sys::i2s_port_t_I2S_NUM_0;
@@ -682,7 +698,9 @@ mod ffi {
         let code = unsafe { sys::i2s_new_channel(&chan_cfg, null_mut(), &mut rx) };
         check(code, Step::I2sChannel)?;
         if rx.is_null() {
-            return Err(Error::Null { step: Step::I2sChannel });
+            return Err(Error::Null {
+                step: Step::I2sChannel,
+            });
         }
 
         let pdm = pdm_config();
@@ -700,7 +718,13 @@ mod ffi {
     /// Build the I2S data interface and the `esp_codec_dev` record handle.
     pub fn codec_device(
         rx: sys::i2s_chan_handle_t,
-    ) -> Result<(gmf::esp_codec_dev_handle_t, *const gmf::audio_codec_data_if_t), Error> {
+    ) -> Result<
+        (
+            gmf::esp_codec_dev_handle_t,
+            *const gmf::audio_codec_data_if_t,
+        ),
+        Error,
+    > {
         let mut i2s_cfg = gmf::audio_codec_i2s_cfg_t {
             port: sys::i2s_port_t_I2S_NUM_0 as u8,
             rx_handle: rx as *mut core::ffi::c_void,
@@ -844,13 +868,15 @@ mod ffi {
         check(code, Step::CaptureSourceConfig)?;
 
         let video_track = video_track_info(cfg);
-        let code =
-            unsafe { gmf::esp_capture_service_setup_add_track(setup, DEFAULT_STREAM, &video_track) };
+        let code = unsafe {
+            gmf::esp_capture_service_setup_add_track(setup, DEFAULT_STREAM, &video_track)
+        };
         check(code, Step::CaptureTrackVideo)?;
 
         let audio_track = audio_track_info(cfg);
-        let code =
-            unsafe { gmf::esp_capture_service_setup_add_track(setup, DEFAULT_STREAM, &audio_track) };
+        let code = unsafe {
+            gmf::esp_capture_service_setup_add_track(setup, DEFAULT_STREAM, &audio_track)
+        };
         check(code, Step::CaptureTrackAudio)?;
 
         let code = unsafe { gmf::esp_capture_service_setup_apply(service, setup) };
@@ -948,8 +974,8 @@ mod ffi {
         // The RTSP core buffers one encoded frame per track. The 64 KiB
         // default is smaller than a single 1080p JPEG (hundreds of KB), and
         // oversized frames are dropped silently, so size it from the geometry.
-        let vid_frame_size = (pipeline_cfg.width * pipeline_cfg.height / 4)
-            .clamp(64 * 1024, 1024 * 1024) as u32;
+        let vid_frame_size =
+            (pipeline_cfg.width * pipeline_cfg.height / 4).clamp(64 * 1024, 1024 * 1024);
         let setup = gmf::esp_rtsp_service_setup_t {
             local_port: pipeline_cfg.port,
             transport: gmf::esp_rtsp_transport_t_RTSP_TRANSPORT_UDP,
@@ -963,13 +989,10 @@ mod ffi {
         let code = unsafe { gmf::esp_rtsp_service_setup(service, &setup) };
         check(code, Step::RtspSetup)?;
 
-        let url = CString::new(format!(
-            "rtsp://0.0.0.0:{}{}",
-            pipeline_cfg.port, RTSP_PATH
-        ))
-        .map_err(|_| Error::Config {
-            step: Step::RtspUrl,
-        })?;
+        let url = CString::new(format!("rtsp://0.0.0.0:{}{}", pipeline_cfg.port, RTSP_PATH))
+            .map_err(|_| Error::Config {
+                step: Step::RtspUrl,
+            })?;
         let code = unsafe { gmf::esp_rtsp_service_set_url(service, url.as_ptr()) };
         check(code, Step::RtspUrl)?;
 
@@ -1263,16 +1286,16 @@ mod tests {
         assert!(base(0).validate().is_ok());
         assert!(base(12).validate().is_ok());
         assert!(base(63).validate().is_ok());
-        assert!(matches!(
-            base(64).validate(),
-            Err(Error::InvalidConfig(_))
-        ));
+        assert!(matches!(base(64).validate(), Err(Error::InvalidConfig(_))));
     }
 
     #[test]
     fn dvp_source_honours_the_hardware_constraints() {
         let cfg = ffi::dvp_config(12);
-        assert_eq!(cfg.buf_count, 2, "implementation indexes a fixed pic[2] array");
+        assert_eq!(
+            cfg.buf_count, 2,
+            "implementation indexes a fixed pic[2] array"
+        );
         assert_eq!(cfg.xclk_pin, 10);
         assert_eq!(cfg.vsync_pin, 38);
         assert_eq!(cfg.href_pin, 47);

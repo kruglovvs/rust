@@ -305,11 +305,15 @@ pub trait FileSource {
 }
 
 /// The device [`FileSource`]: `std::fs` under one mount point.
+// Only the device server (`server.rs`, not compiled by the host harness)
+// constructs it; the host contract driver uses the in-memory source instead.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CardSource {
     mount: String,
 }
 
+#[allow(dead_code)]
 impl CardSource {
     /// A source over `mount`, the VFS path of the card (`/sdcard`).
     pub fn new(mount: &str) -> CardSource {

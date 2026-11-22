@@ -35,10 +35,7 @@ pub fn run() -> ! {
         Err(error) => fatal("peripheral initialization failed", error),
     };
     let Peripherals {
-        pins,
-        modem,
-        spi2,
-        ..
+        pins, modem, spi2, ..
     } = peripherals;
     let esp_idf_hal::gpio::Pins {
         gpio3,
@@ -89,9 +86,7 @@ pub fn run() -> ! {
         }
     };
 
-    let mount_point = storage
-        .as_ref()
-        .map_or("", |storage| storage.base_path());
+    let mount_point = storage.as_ref().map_or("", |storage| storage.base_path());
     const IP_WAIT: Duration = Duration::from_secs(60);
     let wait_started = std::time::Instant::now();
     let mut station_ip = net::station_ipv4();
@@ -106,7 +101,10 @@ pub fn run() -> ! {
         station_ip = net::station_ipv4();
     }
     match station_ip {
-        Some(_) => logging::log!("boot: station IP ready after {}s", wait_started.elapsed().as_secs()),
+        Some(_) => logging::log!(
+            "boot: station IP ready after {}s",
+            wait_started.elapsed().as_secs()
+        ),
         None => logging::log!("boot: WARNING: no station IP after 60s; starting pipeline anyway"),
     }
     let ipv4 = station_ip.map(|ip| ip.to_string());
@@ -162,7 +160,9 @@ pub fn run() -> ! {
             None
         }
     };
-    let recording = pipeline.as_ref().is_some_and(|pipeline| pipeline.recording());
+    let recording = pipeline
+        .as_ref()
+        .is_some_and(|pipeline| pipeline.recording());
     let audio = pipeline.as_ref().is_some_and(|pipeline| pipeline.audio());
 
     logging::log!(
@@ -190,7 +190,9 @@ pub fn run() -> ! {
             tick = tick.wrapping_add(1);
             if tick % 10 == 0 {
                 let (free, largest, spiram) = heap_sample();
-                logging::log!("boot: heartbeat internal_free={free} largest={largest} spiram_free={spiram}");
+                logging::log!(
+                    "boot: heartbeat internal_free={free} largest={largest} spiram_free={spiram}"
+                );
                 log_recordings();
             }
         }

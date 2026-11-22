@@ -473,7 +473,7 @@ mod list {
     use crate::body::{FileSource, MemorySource};
 
     const SMALL: [u8; 222] = [7; 222];
-    const BIG: [u8; 123_456] = [9; 123_456];
+    static BIG: [u8; 123_456] = [9; 123_456];
     const TINY: [u8; 1] = [1; 1];
 
     fn body_of(dir: &str, files: &[(&str, &[u8])], cap: usize) -> serde_json::Value {

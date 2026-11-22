@@ -78,11 +78,15 @@ struct Probe {
 
 impl Probe {
     fn video(&self) -> Option<&HashMap<String, String>> {
-        self.streams.iter().find(|s| s.get("codec_type").map(String::as_str) == Some("video"))
+        self.streams
+            .iter()
+            .find(|s| s.get("codec_type").map(String::as_str) == Some("video"))
     }
 
     fn audio(&self) -> Option<&HashMap<String, String>> {
-        self.streams.iter().find(|s| s.get("codec_type").map(String::as_str) == Some("audio"))
+        self.streams
+            .iter()
+            .find(|s| s.get("codec_type").map(String::as_str) == Some("audio"))
     }
 }
 
@@ -126,14 +130,16 @@ fn probe(path: &Path) -> Result<Probe, String> {
         "-of",
         "default=noprint_wrappers=1",
     ]).arg(path))?;
-    let format_raw = run(Command::new("ffprobe").args([
-        "-v",
-        "error",
-        "-show_entries",
-        "format=format_name,duration",
-        "-of",
-        "default=noprint_wrappers=1",
-    ]).arg(path))?;
+    let format_raw = run(Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=format_name,duration",
+            "-of",
+            "default=noprint_wrappers=1",
+        ])
+        .arg(path))?;
 
     let mut streams: Vec<HashMap<String, String>> = Vec::new();
     for line in streams_raw.lines() {
@@ -154,16 +160,18 @@ fn probe(path: &Path) -> Result<Probe, String> {
 }
 
 fn video_bitrate(path: &Path, duration: f64) -> Result<f64, String> {
-    let raw = run(Command::new("ffprobe").args([
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "packet=size",
-        "-of",
-        "csv=p=0",
-    ]).arg(path))?;
+    let raw = run(Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=size",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path))?;
     let bytes: u64 = raw
         .lines()
         .filter_map(|line| line.trim().parse::<u64>().ok())
@@ -268,7 +276,7 @@ fn jpeg_dims(frame: &[u8]) -> Option<(u16, u16)> {
             continue;
         }
         match frame[i + 1] {
-            0xC0 | 0xC1 | 0xC2 => {
+            0xC0..=0xC2 => {
                 let height = u16::from_be_bytes([frame[i + 5], frame[i + 6]]);
                 let width = u16::from_be_bytes([frame[i + 7], frame[i + 8]]);
                 return Some((width, height));
@@ -324,10 +332,7 @@ fn jpeg_stats(path: &Path) -> Result<JpegStats, String> {
     stats.frames = sizes.len() as u64;
     let mut sorted = sizes.clone();
     sorted.sort_unstable();
-    stats.median = sorted
-        .get(sorted.len() / 2)
-        .copied()
-        .unwrap_or_default();
+    stats.median = sorted.get(sorted.len() / 2).copied().unwrap_or_default();
     stats.min = sorted.first().copied().unwrap_or_default();
     stats.max = sorted.last().copied().unwrap_or_default();
     stats.short = sizes
@@ -350,7 +355,14 @@ fn signal_stats(path: &Path) -> Result<SignalStats, String> {
     let output = Command::new("ffmpeg")
         .args(["-hide_banner", "-nostdin", "-i"])
         .arg(path)
-        .args(["-vf", "signalstats,metadata=print:file=-", "-an", "-f", "null", "-"])
+        .args([
+            "-vf",
+            "signalstats,metadata=print:file=-",
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ])
         .output()
         .map_err(|error| format!("ffmpeg signalstats: {error}"))?;
     let text = String::from_utf8_lossy(&output.stdout);
@@ -576,7 +588,10 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
     let mkv = outdir.join("stream.mkv");
     let mjpeg = outdir.join("video.mjpeg");
     let probe = probe(&mkv)?;
-    let video = probe.video().ok_or("no video stream in the recording")?.clone();
+    let video = probe
+        .video()
+        .ok_or("no video stream in the recording")?
+        .clone();
     let audio = probe.audio().cloned();
     let duration = number(&probe.format, "duration").unwrap_or(0.0);
     let frames = integer(&video, "nb_read_frames").unwrap_or(0);
@@ -613,15 +628,23 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
     let mut check = |name: String, ok: bool, detail: String| {
         checks.push((name, ok, detail));
     };
-    check("container".into(), probe.format.contains_key("format_name"),
-        field(&probe.format, "format_name").unwrap_or("?").to_string());
+    check(
+        "container".into(),
+        probe.format.contains_key("format_name"),
+        field(&probe.format, "format_name")
+            .unwrap_or("?")
+            .to_string(),
+    );
     check(
         format!("duration >= {} s", opts.min_duration),
         duration >= opts.min_duration,
         format!("{duration:.1}s"),
     );
-    check("video codec mjpeg".into(), field(&video, "codec_name") == Some("mjpeg"),
-        field(&video, "codec_name").unwrap_or("?").to_string());
+    check(
+        "video codec mjpeg".into(),
+        field(&video, "codec_name") == Some("mjpeg"),
+        field(&video, "codec_name").unwrap_or("?").to_string(),
+    );
     check(
         format!("video scale {}x{}", opts.width, opts.height),
         integer(&video, "width") == Some(opts.width as u64)
@@ -695,7 +718,10 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
             ));
         }
         if levels.crest_db < 6.0 {
-            warns.push(format!("crest factor {:.1} dB - signal sounds compressed", levels.crest_db));
+            warns.push(format!(
+                "crest factor {:.1} dB - signal sounds compressed",
+                levels.crest_db
+            ));
         }
         if levels.band_high_db < -40.0 && levels.band_low_db > -3.0 {
             warns.push(format!(
@@ -722,10 +748,21 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
     } else {
         1.0
     };
-    check("jpeg payload clean (<10% corrupt frames)".into(), corrupt_ratio <= 0.10,
-        format!("{}/{} frames ({:.0}%) with corrupt DC", warnings.corrupt_dc, frames, corrupt_ratio * 100.0));
-    check("jpeg header valid".into(), warnings.invalid_size == 0,
-        format!("{} frames with invalid picture size", warnings.invalid_size));
+    check(
+        "jpeg payload clean (<10% corrupt frames)".into(),
+        corrupt_ratio <= 0.10,
+        format!(
+            "{}/{} frames ({:.0}%) with corrupt DC",
+            warnings.corrupt_dc,
+            frames,
+            corrupt_ratio * 100.0
+        ),
+    );
+    check(
+        "jpeg header valid".into(),
+        warnings.invalid_size == 0,
+        format!("{} frames with invalid picture size", warnings.invalid_size),
+    );
 
     if jpeg.truncated > 0 {
         warns.push(format!(
@@ -734,7 +771,10 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
         ));
     }
     if jpeg.frames > 0 && jpeg.short as f64 > 0.10 * jpeg.frames as f64 {
-        warns.push(format!("{} short frames ({} of median size)", jpeg.short, jpeg.median));
+        warns.push(format!(
+            "{} short frames ({} of median size)",
+            jpeg.short, jpeg.median
+        ));
     }
     if jpeg.garbage > 1024 {
         warns.push(format!("{} stray bytes between frames", jpeg.garbage));
@@ -758,8 +798,11 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
     if warnings.total() > 20 {
         warns.push(format!(
             "{} decoder warnings (dc={} size={} overread={} eoi={})",
-            warnings.total(), warnings.corrupt_dc, warnings.invalid_size,
-            warnings.overread, warnings.eoi_missing
+            warnings.total(),
+            warnings.corrupt_dc,
+            warnings.invalid_size,
+            warnings.overread,
+            warnings.eoi_missing
         ));
     }
     if colour.frames > 0 && colour.outlier_frames as f64 > 0.05 * colour.frames as f64 {
@@ -769,23 +812,37 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
         ));
     }
     if !(50_000.0..=3_000_000.0).contains(&bitrate) {
-        warns.push(format!("video bitrate {:.0} kb/s outside 50-3000", bitrate / 1000.0));
+        warns.push(format!(
+            "video bitrate {:.0} kb/s outside 50-3000",
+            bitrate / 1000.0
+        ));
     }
 
-    println!("file            {}  ({:.2} MB)", mkv.display(),
-        std::fs::metadata(&mkv).map(|m| m.len()).unwrap_or(0) as f64 / 1e6);
+    println!(
+        "file            {}  ({:.2} MB)",
+        mkv.display(),
+        std::fs::metadata(&mkv).map(|m| m.len()).unwrap_or(0) as f64 / 1e6
+    );
     println!("duration        {duration:.1} s");
-    println!("video           {} {}x{} @ {fps:.1} fps, {frames} frames, {:.0} kb/s",
-        field(&video, "codec_name").unwrap_or("?"), field(&video, "width").unwrap_or("?"),
-        field(&video, "height").unwrap_or("?"), bitrate / 1000.0);
+    println!(
+        "video           {} {}x{} @ {fps:.1} fps, {frames} frames, {:.0} kb/s",
+        field(&video, "codec_name").unwrap_or("?"),
+        field(&video, "width").unwrap_or("?"),
+        field(&video, "height").unwrap_or("?"),
+        bitrate / 1000.0
+    );
     if let Some(audio) = &audio {
         let rate = integer(audio, "sample_rate").unwrap_or(0);
         let channels = integer(audio, "channels").unwrap_or(0);
         let audio_bitrate = integer(audio, "bit_rate")
             .unwrap_or_else(|| rate.saturating_mul(channels).saturating_mul(8));
-        println!("audio           {} {} Hz {} ch {} kb/s",
-            field(audio, "codec_name").unwrap_or("?"), rate, channels,
-            audio_bitrate as f64 / 1000.0);
+        println!(
+            "audio           {} {} Hz {} ch {} kb/s",
+            field(audio, "codec_name").unwrap_or("?"),
+            rate,
+            channels,
+            audio_bitrate as f64 / 1000.0
+        );
     }
     if let Some(levels) = &levels {
         println!(
@@ -794,25 +851,48 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
         );
         println!(
             "audio noise     floor {:.1} dBFS, signal {:.1} dBFS, SNR {:.1} dB, clip {:.3}%",
-            levels.noise_db, levels.signal_db, levels.snr_db, levels.clipped_fraction * 100.0
+            levels.noise_db,
+            levels.signal_db,
+            levels.snr_db,
+            levels.clipped_fraction * 100.0
         );
         println!(
             "audio spectrum  <1kHz {:.1} dB, 1-3kHz {:.1} dB, >3kHz {:.1} dB, silence {:.1} s",
-            levels.band_low_db, levels.band_mid_db, levels.band_high_db,
-            levels.longest_silence_s
+            levels.band_low_db, levels.band_mid_db, levels.band_high_db, levels.longest_silence_s
         );
     }
-    println!("jpeg frames     {} ({} B median, {}-{} B)", jpeg.frames, jpeg.median, jpeg.min, jpeg.max);
-    println!("jpeg integrity  {} truncated, {} short, {} stray B, dims {}",
-        jpeg.truncated, jpeg.short, jpeg.garbage, dims_text(&jpeg.dims));
-    println!("sharpness       blur mean {:?} (lower is sharper)", blur_mean);
-    println!("blockiness      block mean {:?} (0-100, lower is cleaner)", block_mean);
+    println!(
+        "jpeg frames     {} ({} B median, {}-{} B)",
+        jpeg.frames, jpeg.median, jpeg.min, jpeg.max
+    );
+    println!(
+        "jpeg integrity  {} truncated, {} short, {} stray B, dims {}",
+        jpeg.truncated,
+        jpeg.short,
+        jpeg.garbage,
+        dims_text(&jpeg.dims)
+    );
+    println!(
+        "sharpness       blur mean {:?} (lower is sharper)",
+        blur_mean
+    );
+    println!(
+        "blockiness      block mean {:?} (0-100, lower is cleaner)",
+        block_mean
+    );
     println!("freeze / black  {freeze_total:.1} s / {black_total:.1} s");
-    println!("decoder         {} warnings: {} corrupt DC, {} invalid size, {} overread, {} EOI missing",
-        warnings.total(), warnings.corrupt_dc, warnings.invalid_size,
-        warnings.overread, warnings.eoi_missing);
-    println!("colour          {}/{} frames >3 sigma; YAVG {:?} SATAVG {:?}",
-        colour.outlier_frames, colour.frames, colour.yavg_mean, colour.satavg_mean);
+    println!(
+        "decoder         {} warnings: {} corrupt DC, {} invalid size, {} overread, {} EOI missing",
+        warnings.total(),
+        warnings.corrupt_dc,
+        warnings.invalid_size,
+        warnings.overread,
+        warnings.eoi_missing
+    );
+    println!(
+        "colour          {}/{} frames >3 sigma; YAVG {:?} SATAVG {:?}",
+        colour.outlier_frames, colour.frames, colour.yavg_mean, colour.satavg_mean
+    );
 
     println!("\nchecks:");
     let mut failed = 0;
@@ -859,13 +939,22 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
     }
     let _ = writeln!(json, "  \"jpeg\": {{\"frames\": {}, \"truncated\": {}, \"short\": {}, \"garbage_bytes\": {}, \"median_bytes\": {}, \"dimensions\": \"{}\"}},",
         jpeg.frames, jpeg.truncated, jpeg.short, jpeg.garbage, jpeg.median, dims_text(&jpeg.dims));
-    let _ = writeln!(json, "  \"blur_mean\": {}, \"block_mean\": {},",
+    let _ = writeln!(
+        json,
+        "  \"blur_mean\": {}, \"block_mean\": {},",
         blur_mean.map_or("null".to_string(), |v| format!("{v:.4}")),
-        block_mean.map_or("null".to_string(), |v| format!("{v:.4}")));
-    let _ = writeln!(json, "  \"freeze_s\": {freeze_total:.3}, \"black_s\": {black_total:.3},");
+        block_mean.map_or("null".to_string(), |v| format!("{v:.4}"))
+    );
+    let _ = writeln!(
+        json,
+        "  \"freeze_s\": {freeze_total:.3}, \"black_s\": {black_total:.3},"
+    );
     let _ = writeln!(json, "  \"decode_warnings\": {},", warnings.total());
-    let _ = writeln!(json, "  \"colour\": {{\"frames\": {}, \"outlier_frames\": {}}},",
-        colour.frames, colour.outlier_frames);
+    let _ = writeln!(
+        json,
+        "  \"colour\": {{\"frames\": {}, \"outlier_frames\": {}}},",
+        colour.frames, colour.outlier_frames
+    );
     let _ = writeln!(json, "  \"failed_checks\": {failed}");
     let _ = writeln!(json, "}}");
     std::fs::write(outdir.join("metrics.json"), json).map_err(|error| error.to_string())?;
@@ -883,7 +972,14 @@ pub fn report(outdir: &Path, opts: &Options) -> Result<Outcome, String> {
             warnings: warns,
         })
     } else {
-        println!("\nRESULT: PASS{}", if warns.is_empty() { "" } else { " with warnings" });
+        println!(
+            "\nRESULT: PASS{}",
+            if warns.is_empty() {
+                ""
+            } else {
+                " with warnings"
+            }
+        );
         Ok(Outcome {
             verdict: Verdict::Pass,
             failed: Vec::new(),
