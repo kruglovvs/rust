@@ -140,9 +140,6 @@ impl NetConfig {
 
 /// Typed errors for network bring-up (house style: Display + Error, no
 /// string-matching at call sites).
-// The device bring-up path constructs the later variants; the host harness
-// compiles only this pure layer, so they read as unconstructed there.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetError {
     SsidInvalid { len: usize },
@@ -909,5 +906,39 @@ mod tests {
         let _ = is_synced();
         let _ = last_sync_utc();
         let _ = may_send_rtcp();
+    }
+
+    #[test]
+    fn every_net_error_has_a_distinct_non_empty_display() {
+        // The device bring-up path reports these to the boot log, so each one
+        // must name its failure; a blank or duplicated message would make two
+        // different bring-up failures indistinguishable in that log.
+        let variants = [
+            NetError::SsidInvalid { len: 0 },
+            NetError::PasswordInvalid { len: 0 },
+            NetError::HostnameInvalid,
+            NetError::ConfigInvalid("probe"),
+            NetError::EventLoopTaken,
+            NetError::NvsTaken,
+            NetError::WifiInit,
+            NetError::WifiConfig,
+            NetError::WifiStart,
+            NetError::WifiConnect,
+            NetError::WifiNetifUp,
+            NetError::MdnsInit,
+            NetError::MdnsConfig,
+            NetError::ThreadSpawn,
+        ];
+        let messages: Vec<String> = variants.iter().map(ToString::to_string).collect();
+        assert!(
+            messages.iter().all(|message| !message.is_empty()),
+            "every NetError must render a non-empty message: {messages:?}"
+        );
+        let distinct: std::collections::HashSet<&String> = messages.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            variants.len(),
+            "each NetError variant must be distinguishable: {messages:?}"
+        );
     }
 }

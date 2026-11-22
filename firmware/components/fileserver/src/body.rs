@@ -305,15 +305,11 @@ pub trait FileSource {
 }
 
 /// The device [`FileSource`]: `std::fs` under one mount point.
-// Only the device server (`server.rs`, not compiled by the host harness)
-// constructs it; the host contract driver uses the in-memory source instead.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CardSource {
     mount: String,
 }
 
-#[allow(dead_code)]
 impl CardSource {
     /// A source over `mount`, the VFS path of the card (`/sdcard`).
     pub fn new(mount: &str) -> CardSource {
@@ -956,5 +952,66 @@ mod tests {
         assert_eq!(body_for(Method::Other, body.clone()), body);
         assert_eq!(body_for(Method::Get, body.clone()), body);
         assert_eq!(body_for(Method::Head, body), Body::empty());
+    }
+
+    #[test]
+    fn card_source_maps_paths_and_refuses_escapes() {
+        let source = CardSource::new("/sdcard");
+        assert_eq!(
+            source.file_path("rec/a.avi"),
+            Ok("/sdcard/rec/a.avi".to_string())
+        );
+        assert_eq!(source.dir_path(""), Ok("/sdcard".to_string()));
+        for refused in ["../x", "/abs", "", "rec//a.avi", "rec/../a.avi"] {
+            assert_eq!(
+                source.file_path(refused),
+                Err(Error::NotFound),
+                "{refused:?} must stay inside the mount"
+            );
+        }
+    }
+
+    #[cfg(all(test, not(target_os = "espidf")))]
+    #[test]
+    fn card_source_reads_a_real_directory() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("card-source-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(root.join("rec")).expect("create the temp card");
+        std::fs::write(root.join("rec/a.avi"), b"abcdefgh").expect("write the first file");
+        std::fs::write(root.join("rec/b.avi"), b"01234567").expect("write the second file");
+
+        let source = CardSource::new(root.to_str().expect("utf-8 temp path"));
+        let mount_listing = source.list("");
+        let rec_listing = source.list("rec");
+        let len = source.len("rec/a.avi");
+        let mut partial = [0u8; 4];
+        let at_offset = source.read_at("rec/a.avi", 2, &mut partial);
+
+        // Collect first, assert after the directory is gone: a failing
+        // assertion must not leave the temp card behind.
+        std::fs::remove_dir_all(&root).expect("remove the temp card");
+
+        let mut mount_names: Vec<String> = mount_listing
+            .expect("the mount lists")
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        mount_names.sort();
+        assert_eq!(mount_names, ["rec"]);
+
+        let mut rec_names: Vec<String> = rec_listing
+            .expect("the directory lists")
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        rec_names.sort();
+        assert_eq!(rec_names, ["a.avi", "b.avi"]);
+
+        assert_eq!(len, Ok(8));
+        assert_eq!(at_offset, Ok(4));
+        assert_eq!(&partial, b"cdef");
     }
 }
